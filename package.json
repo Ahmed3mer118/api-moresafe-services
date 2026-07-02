@@ -4,9 +4,7 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "mongo:local": "mongod --dbpath ./data/db --port 27017 --bind_ip 127.0.0.1",
-    "dev:api": "nodemon src/server.js",
-    "dev": "concurrently -k -n mongo,api -c yellow,cyan \"npm run mongo:local\" \"wait-on tcp:127.0.0.1:27017 && npm run dev:api\"",
+    "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed": "node src/seed/seedData.js"
   },

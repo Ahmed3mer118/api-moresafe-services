@@ -29,4 +29,9 @@ projectSchema.virtual('remaining').get(function remaining() {
 projectSchema.set('toJSON', { virtuals: true });
 projectSchema.set('toObject', { virtuals: true });
 
+projectSchema.index({ manager: 1, status: 1 });
+projectSchema.index({ accountants: 1 });
+projectSchema.index({ status: 1, createdAt: -1 });
+projectSchema.index({ createdAt: -1 });
+
 export default mongoose.model('Project', projectSchema);

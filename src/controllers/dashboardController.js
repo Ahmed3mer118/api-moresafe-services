@@ -26,7 +26,11 @@ export async function adminDashboard(req, res, next) {
       User.countDocuments({ isActive: true }),
       Project.countDocuments({ status: { $ne: 'closed' } }),
       Custody.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-      ActivityLog.find().sort({ createdAt: -1 }).limit(10).populate('user', 'name nameEn'),
+      ActivityLog.find()
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .populate('user', 'name nameEn')
+        .lean(),
       activityLast7Days(),
       usersByRoleChart(),
     ]);
@@ -80,7 +84,8 @@ export async function projectManagerDashboard(req, res, next) {
   try {
     const projects = await Project.find({})
       .select('name nameEn budget spent status manager accountants')
-      .populate('manager', 'name nameEn');
+      .populate('manager', 'name nameEn')
+      .lean({ virtuals: true });
     const projectIds = projects.map((p) => p._id);
 
     const [pendingCustodies, managers, totalSpent, custodyChart, reports] = await Promise.all([
@@ -113,7 +118,9 @@ export async function projectAccountantDashboard(req, res, next) {
     const openCustody = await Custody.findOne({
       holder: req.user._id,
       status: CUSTODY_STATUS.OPEN,
-    }).populate('project', 'name nameEn');
+    })
+      .populate('project', 'name nameEn')
+      .lean({ virtuals: true });
 
     const [openCount, rejected, draftInvoices, invoiceChart, expenseTrend, recentInvoices] =
       await Promise.all([
@@ -132,7 +139,8 @@ export async function projectAccountantDashboard(req, res, next) {
           .populate('project', 'name nameEn')
           .select('referenceNumber project supplier category total subtotal vatAmount status invoiceDate attachments attachmentUrl lineItems createdAt')
           .sort({ createdAt: -1 })
-          .limit(8),
+          .limit(8)
+          .lean(),
       ]);
 
     res.json({
@@ -157,7 +165,8 @@ export async function adminAnalytics(req, res, next) {
     const recentActivity = await ActivityLog.find()
       .sort({ createdAt: -1 })
       .limit(8)
-      .populate('user', 'name nameEn');
+      .populate('user', 'name nameEn')
+      .lean();
     res.json({ ...summary, recentActivity });
   } catch (err) {
     next(err);
@@ -193,7 +202,8 @@ export async function listVouchers(req, res, next) {
     const vouchers = await Voucher.find()
       .populate('beneficiary', 'name nameEn')
       .populate('project', 'name nameEn')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
     res.json(vouchers);
   } catch (err) {
     next(err);
@@ -254,7 +264,8 @@ export async function listNotifications(req, res, next) {
   try {
     const notifications = await Notification.find({ user: req.user._id })
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(50)
+      .lean();
     const unread = await Notification.countDocuments({ user: req.user._id, isRead: false });
     res.json({ notifications, unread });
   } catch (err) {
@@ -285,7 +296,8 @@ export async function listActivityLogs(req, res, next) {
         .populate('user', 'name nameEn role')
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
       ActivityLog.countDocuments(),
     ]);
 
@@ -305,7 +317,8 @@ export async function taxCompliance(req, res, next) {
   try {
     const invoices = await Invoice.find({ taxNumber: { $exists: true } })
       .select('referenceNumber supplier taxNumber vatAmount taxVerified total status')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
     res.json(invoices);
   } catch (err) {
     next(err);
@@ -318,7 +331,8 @@ export async function settledArchive(req, res, next) {
       .populate('holder', 'name nameEn')
       .populate('project', 'name nameEn')
       .populate('invoices')
-      .sort({ settledAt: -1 });
+      .sort({ settledAt: -1 })
+      .lean({ virtuals: true });
     res.json(custodies);
   } catch (err) {
     next(err);

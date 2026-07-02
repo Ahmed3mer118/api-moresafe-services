@@ -237,7 +237,7 @@ export async function adminAnalyticsSummary() {
 export async function projectAccountantReports(projectIds) {
   const filter = projectIds?.length ? { project: { $in: projectIds } } : {};
 
-  const [rejectedInvoices, nearBudget, custodies, projects] = await Promise.all([
+  const [rejectedInvoices, nearBudget, avgApprovalAgg, projects] = await Promise.all([
     Invoice.countDocuments({
       ...filter,
       status: { $in: [INVOICE_STATUS.PM_REJECTED, INVOICE_STATUS.FINANCE_REJECTED] },
@@ -246,23 +246,35 @@ export async function projectAccountantReports(projectIds) {
       ...(projectIds?.length ? { _id: { $in: projectIds } } : {}),
       status: 'near_budget',
     }),
-    Custody.find({
-      ...filter,
-      status: CUSTODY_STATUS.SETTLED,
-      closedAt: { $exists: true },
-      pmApprovedAt: { $exists: true },
-    }).select('closedAt pmApprovedAt'),
-    Project.find(projectIds?.length ? { _id: { $in: projectIds } } : {}).select('budget spent'),
+    Custody.aggregate([
+      {
+        $match: {
+          ...filter,
+          status: CUSTODY_STATUS.SETTLED,
+          closedAt: { $exists: true },
+          pmApprovedAt: { $exists: true },
+        },
+      },
+      {
+        $project: {
+          hours: {
+            $max: [
+              0,
+              {
+                $divide: [{ $subtract: ['$pmApprovedAt', '$closedAt'] }, 1000 * 60 * 60],
+              },
+            ],
+          },
+        },
+      },
+      { $group: { _id: null, avg: { $avg: '$hours' } } },
+    ]),
+    Project.find(projectIds?.length ? { _id: { $in: projectIds } } : {})
+      .select('budget spent')
+      .lean(),
   ]);
 
-  let avgApprovalHours = 0;
-  if (custodies.length) {
-    const total = custodies.reduce((s, c) => {
-      const h = (new Date(c.pmApprovedAt) - new Date(c.closedAt)) / (1000 * 60 * 60);
-      return s + Math.max(0, h);
-    }, 0);
-    avgApprovalHours = Math.round((total / custodies.length) * 10) / 10;
-  }
+  const avgApprovalHours = Math.round((avgApprovalAgg[0]?.avg || 0) * 10) / 10;
 
   let budgetCompliance = 100;
   if (projects.length) {

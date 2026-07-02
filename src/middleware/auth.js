@@ -10,7 +10,9 @@ export async function authenticate(req, res, next) {
 
     const token = header.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).populate('projects', 'name nameEn');
+    const user = await User.findById(decoded.id)
+      .select('-password')
+      .populate('projects', 'name nameEn');
 
     if (!user || !user.isActive) {
       return res.status(401).json({ message: 'Unauthorized' });

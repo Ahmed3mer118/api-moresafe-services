@@ -13,7 +13,7 @@ const uploadRoot = path.join(process.cwd(), 'uploads', 'invoices');
 async function notifyInvoicePendingApproval(project, invoice) {
   let accountantIds = project.accountants?.length ? [...project.accountants] : [];
   if (!accountantIds.length) {
-    const accountants = await User.find({ role: ROLES.PROJECT_ACCOUNTANT, isActive: true }).select('_id');
+    const accountants = await User.find({ role: ROLES.PROJECT_ACCOUNTANT, isActive: true }).select('_id').lean();
     accountantIds = accountants.map((u) => u._id);
   }
 
@@ -157,7 +157,8 @@ export async function listInvoices(req, res, next) {
       .populate('uploadedBy', 'name nameEn')
       .populate('custody', 'custodyNumber status')
       .select('referenceNumber invoiceNumber project uploadedBy custody supplier category lineItems subtotal vatAmount total taxNumber status invoiceDate attachments attachmentUrl rejectionReason createdAt')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.json(invoices);
   } catch (err) {
@@ -407,7 +408,7 @@ export async function rejectedInvoices(req, res, next) {
       uploadedBy: req.user._id,
       status: { $in: [INVOICE_STATUS.PM_REJECTED, INVOICE_STATUS.FINANCE_REJECTED] },
     };
-    const invoices = await Invoice.find(filter).populate('project', 'name nameEn');
+    const invoices = await Invoice.find(filter).populate('project', 'name nameEn').lean();
     res.json(invoices);
   } catch (err) {
     next(err);

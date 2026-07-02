@@ -28,7 +28,8 @@ export async function listCustodies(req, res, next) {
         select: 'referenceNumber invoiceNumber supplier category total subtotal vatAmount status invoiceDate attachments attachmentUrl lineItems',
         populate: { path: 'uploadedBy', select: 'name nameEn email' },
       })
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .lean({ virtuals: true });
 
     res.json(custodies);
   } catch (err) {
@@ -41,7 +42,8 @@ export async function getCustody(req, res, next) {
     const custody = await Custody.findById(req.params.id)
       .populate('project')
       .populate('holder', 'name nameEn email')
-      .populate({ path: 'invoices', populate: { path: 'uploadedBy', select: 'name' } });
+      .populate({ path: 'invoices', populate: { path: 'uploadedBy', select: 'name' } })
+      .lean({ virtuals: true });
     if (!custody) return res.status(404).json({ message: 'Custody not found' });
     res.json(custody);
   } catch (err) {
@@ -69,7 +71,7 @@ export async function createCustody(req, res, next) {
       holder: holderId,
       project: projectId,
       status: CUSTODY_STATUS.OPEN,
-    });
+    }).select('_id').lean();
     if (openExists && req.user.role !== ROLES.PROJECT_ACCOUNTANT) {
       return res.status(400).json({ message: 'You already have an open custody for this project' });
     }
@@ -84,7 +86,9 @@ export async function createCustody(req, res, next) {
       status: CUSTODY_STATUS.OPEN,
     });
 
-    const populated = await Custody.findById(custody._id).populate('project', 'name nameEn');
+    const populated = await Custody.findById(custody._id)
+      .populate('project', 'name nameEn')
+      .lean({ virtuals: true });
     res.status(201).json(populated);
   } catch (err) {
     next(err);
@@ -127,7 +131,8 @@ export async function getOpenCustody(req, res, next) {
       status: CUSTODY_STATUS.OPEN,
     })
       .populate('project', 'name nameEn')
-      .populate('invoices');
+      .populate('invoices')
+      .lean({ virtuals: true });
 
     res.json(custody);
   } catch (err) {

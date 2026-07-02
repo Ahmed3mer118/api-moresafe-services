@@ -118,7 +118,7 @@ export class CustodyWorkflowService {
       throw Object.assign(new Error('Custody not pending PM approval'), { status: 400 });
     }
 
-    const approver = await User.findById(userId);
+    const approver = await User.findById(userId).select('role').lean();
     if (!approver || approver.role !== ROLES.PROJECT_ACCOUNTANT) {
       throw Object.assign(new Error('Not authorized to approve custody'), { status: 403 });
     }
@@ -129,7 +129,7 @@ export class CustodyWorkflowService {
       custody.pmApprovedBy = userId;
       await Invoice.updateMany({ custody: custodyId }, { status: INVOICE_STATUS.PENDING_FINANCE });
 
-      const accountants = await User.find({ role: 'chief_accountant', isActive: true });
+      const accountants = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true }).select('_id').lean();
       await Promise.all(
         accountants.map((a) =>
           createNotification({
@@ -289,7 +289,7 @@ export class CustodyWorkflowService {
       throw Object.assign(new Error('Invoice is not pending approval'), { status: 400 });
     }
 
-    const approver = await User.findById(userId);
+    const approver = await User.findById(userId).select('role').lean();
     if (!approver || approver.role !== ROLES.PROJECT_ACCOUNTANT) {
       throw Object.assign(new Error('Not authorized to review invoice'), { status: 403 });
     }
@@ -298,7 +298,7 @@ export class CustodyWorkflowService {
       invoice.status = INVOICE_STATUS.PENDING_FINANCE;
       invoice.rejectionReason = undefined;
 
-      const financeUsers = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true });
+      const financeUsers = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true }).select('_id').lean();
       await Promise.all(
         financeUsers.map((a) =>
           createNotification({

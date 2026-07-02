@@ -47,6 +47,12 @@ custodySchema.virtual('remaining').get(function remaining() {
 custodySchema.set('toJSON', { virtuals: true });
 custodySchema.set('toObject', { virtuals: true });
 
+custodySchema.index({ holder: 1, status: 1 });
+custodySchema.index({ project: 1, status: 1 });
+custodySchema.index({ status: 1, updatedAt: -1 });
+custodySchema.index({ settledAt: -1 });
+custodySchema.index({ closedAt: 1, pmApprovedAt: 1 });
+
 export async function nextCustodyNumber() {
   const count = await mongoose.model('Custody').countDocuments();
   return `CST-${1001 + count}`;

@@ -22,6 +22,11 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+userSchema.index({ role: 1, isActive: 1 });
+userSchema.index({ projects: 1 });
+userSchema.index({ name: 1 });
+// Note: avoid text index — User.language field conflicts with MongoDB text language_override ('ar' unsupported)
+
 userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcryptCompare(candidate, this.password);
 };

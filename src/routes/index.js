@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
+import fs from 'fs/promises';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { ROLES } from '../constants/roles.js';
 import * as authCtrl from '../controllers/authController.js';
@@ -13,11 +13,26 @@ import * as dashboardCtrl from '../controllers/dashboardController.js';
 import * as ocrCtrl from '../controllers/ocrController.js';
 
 const uploadDir = path.join(process.cwd(), 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+let uploadDirReady = false;
+
+async function ensureUploadDir() {
+  if (uploadDirReady) return;
+  await fs.mkdir(uploadDir, { recursive: true });
+  uploadDirReady = true;
+}
 
 const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = Router();
+
+router.use(async (req, res, next) => {
+  try {
+    await ensureUploadDir();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // Auth
 router.post('/auth/login', authCtrl.login);
@@ -26,7 +41,8 @@ router.patch('/auth/profile', authenticate, authCtrl.updateProfile);
 router.post('/auth/change-password', authenticate, authCtrl.changePassword);
 
 // Users (admin + approver role lists accountants/engineers)
-router.get('/users', authenticate, authorize(ROLES.ADMIN, ROLES.PROJECT_ACCOUNTANT, ROLES.CHIEF_ACCOUNTANT), userCtrl.listUsers);
+// router.get('/users', authenticate, authorize(ROLES.ADMIN, ROLES.PROJECT_ACCOUNTANT, ROLES.CHIEF_ACCOUNTANT), userCtrl.listUsers);
+router.get('/users', authenticate, authorize(ROLES.ADMIN), userCtrl.listUsers);
 router.post('/users', authenticate, authorize(ROLES.ADMIN), userCtrl.createUser);
 router.patch('/users/:id', authenticate, authorize(ROLES.ADMIN), userCtrl.updateUser);
 router.get('/users/stats', authenticate, authorize(ROLES.ADMIN), userCtrl.getUserStats);

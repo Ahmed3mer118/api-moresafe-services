@@ -46,6 +46,13 @@ const invoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+invoiceSchema.index({ uploadedBy: 1, status: 1, createdAt: -1 });
+invoiceSchema.index({ project: 1, status: 1 });
+invoiceSchema.index({ custody: 1 });
+invoiceSchema.index({ status: 1, createdAt: -1 });
+invoiceSchema.index({ supplier: 1, total: -1 });
+invoiceSchema.index({ createdAt: -1 });
+
 export async function nextInvoiceReference() {
   const count = await mongoose.model('Invoice').countDocuments();
   return `INV-${1040 + count}`;

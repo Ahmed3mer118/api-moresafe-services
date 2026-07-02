@@ -15,7 +15,8 @@ export async function listProjects(req, res, next) {
     const projects = await Project.find(filter)
       .populate('manager', 'name nameEn email')
       .populate('accountants', 'name nameEn email')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean({ virtuals: true });
 
     res.json(projects);
   } catch (err) {
@@ -26,7 +27,8 @@ export async function listProjects(req, res, next) {
 export async function getProject(req, res, next) {
   try {
     const project = await Project.findById(req.params.id)
-      .populate('manager accountants engineers', 'name nameEn email role');
+      .populate('manager accountants engineers', 'name nameEn email role')
+      .lean({ virtuals: true });
     if (!project) return res.status(404).json({ message: 'Project not found' });
 
     if (req.user.role === ROLES.PROJECT_MANAGER) {
@@ -116,7 +118,8 @@ export async function updateProject(req, res, next) {
 
     const populated = await Project.findById(project._id)
       .populate('manager', 'name nameEn email')
-      .populate('accountants', 'name nameEn email');
+      .populate('accountants', 'name nameEn email')
+      .lean({ virtuals: true });
 
     res.json(populated);
   } catch (err) {
@@ -126,7 +129,7 @@ export async function updateProject(req, res, next) {
 
 export async function projectBudgetSummary(req, res, next) {
   try {
-    const projects = await Project.find().select('name nameEn budget spent status');
+    const projects = await Project.find().select('name nameEn budget spent status').lean({ virtuals: true });
     res.json(projects);
   } catch (err) {
     next(err);

@@ -15,6 +15,9 @@ const voucherSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+voucherSchema.index({ createdAt: -1 });
+voucherSchema.index({ beneficiary: 1, createdAt: -1 });
+
 export async function nextVoucherNumber() {
   const count = await mongoose.model('Voucher').countDocuments();
   return `VCH-${558 + count}`;

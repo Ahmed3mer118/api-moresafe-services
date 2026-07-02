@@ -12,7 +12,8 @@ function signToken(user) {
 export async function login(req, res, next) {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email: email?.toLowerCase() }).populate('projects', 'name nameEn');
+    const user = await User.findOne({ email: email?.toLowerCase() })
+      .populate('projects', 'name nameEn');
 
     if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({ message: 'Invalid email or password' });
