@@ -1,5 +1,5 @@
 {
-  "name": "smart-custody-backend",
+  "name": "Moresafe-backend",
   "version": "1.0.0",
   "type": "module",
   "main": "src/server.js",

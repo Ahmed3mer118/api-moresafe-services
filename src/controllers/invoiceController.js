@@ -1,5 +1,3 @@
-import fs from 'fs/promises';
-import path from 'path';
 import Invoice, { nextInvoiceReference } from '../models/Invoice.js';
 import Custody from '../models/Custody.js';
 import Project from '../models/Project.js';
@@ -7,8 +5,7 @@ import User from '../models/User.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES } from '../constants/roles.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { createNotification, logActivity } from '../services/notificationService.js';
-
-const uploadRoot = path.join(process.cwd(), 'uploads', 'invoices');
+import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
 
 async function notifyInvoicePendingApproval(project, invoice) {
   let accountantIds = project.accountants?.length ? [...project.accountants] : [];
@@ -45,18 +42,10 @@ function parseLineItems(raw) {
 
 async function persistUploadFiles(files) {
   if (!files?.length) return [];
-  await fs.mkdir(uploadRoot, { recursive: true });
   const attachments = [];
   for (const file of files) {
-    const ext = path.extname(file.originalname) || (file.mimetype?.includes('pdf') ? '.pdf' : '.jpg');
-    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}${ext}`;
-    const dest = path.join(uploadRoot, filename);
-    await fs.rename(file.path, dest);
-    attachments.push({
-      filename: file.originalname || filename,
-      mimeType: file.mimetype || 'image/jpeg',
-      url: `/api/uploads/invoices/${filename}`,
-    });
+    const stored = await storeMulterFile(file);
+    if (stored) attachments.push(stored);
   }
   return attachments;
 }
@@ -73,32 +62,11 @@ async function persistBase64Attachments(raw) {
   }
   if (!Array.isArray(list)) return [];
 
-  await fs.mkdir(uploadRoot, { recursive: true });
   const attachments = [];
-
   for (const att of list) {
-    const data = att.data || att.base64;
-    if (!data) continue;
-
-    let mimeType = att.mimeType || 'image/jpeg';
-    let base64 = data;
-    const match = String(data).match(/^data:([^;]+);base64,(.+)$/);
-    if (match) {
-      mimeType = match[1];
-      base64 = match[2];
-    }
-
-    const ext = mimeType.includes('pdf') ? '.pdf' : '.jpg';
-    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}${ext}`;
-    const dest = path.join(uploadRoot, filename);
-    await fs.writeFile(dest, Buffer.from(base64, 'base64'));
-    attachments.push({
-      filename: att.filename || filename,
-      mimeType,
-      url: `/api/uploads/invoices/${filename}`,
-    });
+    const stored = await storeBase64Payload(att);
+    if (stored) attachments.push(stored);
   }
-
   return attachments;
 }
 
@@ -277,11 +245,6 @@ export async function createInvoice(req, res, next) {
 
     res.status(201).json(populated);
   } catch (err) {
-    if (req.files?.length) {
-      for (const f of req.files) {
-        await fs.unlink(f.path).catch(() => {});
-      }
-    }
     next(err);
   }
 }

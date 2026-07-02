@@ -1,5 +1,6 @@
 import geminiService from '../services/geminiService.js';
 import fs from 'fs/promises';
+import { fileBuffer } from '../services/attachmentStorage.js';
 
 export async function scanInvoice(req, res, next) {
   try {
@@ -7,13 +8,19 @@ export async function scanInvoice(req, res, next) {
       return res.status(400).json({ message: 'File required' });
     }
 
-    const buffer = await fs.readFile(req.file.path);
+    let buffer = fileBuffer(req.file);
+    if (!buffer && req.file.path) {
+      buffer = await fs.readFile(req.file.path);
+      await fs.unlink(req.file.path).catch(() => {});
+    }
+    if (!buffer) {
+      return res.status(400).json({ message: 'File required' });
+    }
+
     const base64 = buffer.toString('base64');
     const mimeType = req.file.mimetype || 'image/jpeg';
 
     const data = await geminiService.extractInvoiceData(base64, mimeType);
-
-    await fs.unlink(req.file.path).catch(() => {});
 
     res.json({ success: true, data });
   } catch (err) {

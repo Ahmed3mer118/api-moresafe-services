@@ -1,9 +1,7 @@
 import { Router } from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs/promises';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { ROLES } from '../constants/roles.js';
+import { upload } from '../middleware/upload.js';
 import * as authCtrl from '../controllers/authController.js';
 import * as userCtrl from '../controllers/userController.js';
 import * as projectCtrl from '../controllers/projectController.js';
@@ -12,27 +10,7 @@ import * as invoiceCtrl from '../controllers/invoiceController.js';
 import * as dashboardCtrl from '../controllers/dashboardController.js';
 import * as ocrCtrl from '../controllers/ocrController.js';
 
-const uploadDir = path.join(process.cwd(), 'uploads');
-let uploadDirReady = false;
-
-async function ensureUploadDir() {
-  if (uploadDirReady) return;
-  await fs.mkdir(uploadDir, { recursive: true });
-  uploadDirReady = true;
-}
-
-const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
-
 const router = Router();
-
-router.use(async (req, res, next) => {
-  try {
-    await ensureUploadDir();
-    next();
-  } catch (err) {
-    next(err);
-  }
-});
 
 // Auth
 router.post('/auth/login', authCtrl.login);
