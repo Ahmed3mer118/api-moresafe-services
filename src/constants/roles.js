@@ -22,6 +22,19 @@ export const CUSTODY_STATUS = {
   FINANCE_REJECTED: 'finance_rejected',
 };
 
+/** PM may attach new invoices while custody is still in their active cycle */
+export const PM_UPLOAD_CUSTODY_STATUSES = [
+  CUSTODY_STATUS.OPEN,
+  CUSTODY_STATUS.CLOSED,
+  CUSTODY_STATUS.PM_REJECTED,
+];
+
+/** PM may submit accumulated invoices for PA review */
+export const PM_SUBMIT_CUSTODY_STATUSES = [
+  CUSTODY_STATUS.OPEN,
+  CUSTODY_STATUS.CLOSED,
+];
+
 export const INVOICE_STATUS = {
   DRAFT: 'draft',
   ACCUMULATED: 'accumulated',

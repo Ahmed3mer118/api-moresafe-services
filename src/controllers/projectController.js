@@ -3,14 +3,25 @@ import User from '../models/User.js';
 import Custody from '../models/Custody.js';
 import { logActivity } from '../services/notificationService.js';
 import { ROLES } from '../constants/roles.js';
+import { resolvePaProjectIds } from '../utils/paProjectAccess.js';
 
 export async function listProjects(req, res, next) {
   try {
     const filter = {};
     const { role, _id } = req.user;
 
-    // Only field project managers see their assigned projects; project accountants see all
-    if (role === ROLES.PROJECT_MANAGER) filter.manager = _id;
+    if (role === ROLES.PROJECT_MANAGER) {
+      const custodyProjectIds = await Custody.distinct('project', { holder: _id });
+      const or = [{ manager: _id }];
+      if (custodyProjectIds.length) {
+        or.push({ _id: { $in: custodyProjectIds } });
+      }
+      filter.$or = or;
+    } else if (role === ROLES.PROJECT_ACCOUNTANT) {
+      const assignedIds = await resolvePaProjectIds(_id, req.user.projects);
+      if (!assignedIds.length) return res.json([]);
+      filter._id = { $in: assignedIds };
+    }
 
     const projects = await Project.find(filter)
       .populate('manager', 'name nameEn email')

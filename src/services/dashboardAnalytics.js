@@ -292,3 +292,232 @@ export async function projectAccountantReports(projectIds) {
     expenseTrend,
   };
 }
+
+export async function adminDisbursementReports(projectId) {
+  const custodyMatch = {};
+  if (projectId) {
+    custodyMatch.project = projectId;
+  }
+
+  const managerRows = await Custody.aggregate([
+    { $match: custodyMatch },
+    {
+      $group: {
+        _id: '$holder',
+        custodiesCount: { $sum: 1 },
+        totalAllocated: { $sum: '$amount' },
+        totalSpent: { $sum: '$spent' },
+        settledCount: {
+          $sum: { $cond: [{ $eq: ['$status', CUSTODY_STATUS.SETTLED] }, 1, 0] },
+        },
+        overBudgetCount: {
+          $sum: { $cond: [{ $gt: ['$spent', '$amount'] }, 1, 0] },
+        },
+        openCount: {
+          $sum: { $cond: [{ $eq: ['$status', CUSTODY_STATUS.OPEN] }, 1, 0] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'user',
+      },
+    },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        userId: '$_id',
+        name: '$user.name',
+        nameEn: '$user.nameEn',
+        custodiesCount: 1,
+        totalAllocated: 1,
+        totalSpent: 1,
+        settledCount: 1,
+        overBudgetCount: 1,
+        openCount: 1,
+      },
+    },
+    { $sort: { totalSpent: -1 } },
+  ]);
+
+  const accountantRows = await Custody.aggregate([
+    { $match: { ...custodyMatch, pmApprovedBy: { $exists: true, $ne: null } } },
+    {
+      $group: {
+        _id: '$pmApprovedBy',
+        reviewedCount: { $sum: 1 },
+        approvedCount: {
+          $sum: {
+            $cond: [
+              {
+                $in: [
+                  '$status',
+                  [CUSTODY_STATUS.PM_APPROVED, CUSTODY_STATUS.FINANCE_PENDING, CUSTODY_STATUS.SETTLED],
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+        rejectedCount: {
+          $sum: { $cond: [{ $eq: ['$status', CUSTODY_STATUS.PM_REJECTED] }, 1, 0] },
+        },
+        totalReviewedAmount: { $sum: '$spent' },
+      },
+    },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'user',
+      },
+    },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        userId: '$_id',
+        name: '$user.name',
+        nameEn: '$user.nameEn',
+        reviewedCount: 1,
+        approvedCount: 1,
+        rejectedCount: 1,
+        totalReviewedAmount: 1,
+      },
+    },
+    { $sort: { reviewedCount: -1 } },
+  ]);
+
+  let custodyIds = null;
+  if (projectId) {
+    custodyIds = (await Custody.find(custodyMatch).select('_id').lean()).map((c) => c._id);
+  }
+
+  const logMatch = {
+    entityType: 'custody',
+    $or: [
+      { actionEn: { $regex: /^Settled / } },
+      { actionEn: { $regex: /^Finance rejected / } },
+    ],
+  };
+  if (custodyIds) {
+    logMatch.entityId = { $in: custodyIds };
+  }
+
+  const chiefRows = await ActivityLog.aggregate([
+    { $match: logMatch },
+    {
+      $group: {
+        _id: '$user',
+        settledCount: {
+          $sum: { $cond: [{ $regexMatch: { input: '$actionEn', regex: /^Settled / } }, 1, 0] },
+        },
+        rejectedCount: {
+          $sum: { $cond: [{ $regexMatch: { input: '$actionEn', regex: /^Finance rejected / } }, 1, 0] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'user',
+      },
+    },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        userId: '$_id',
+        name: '$user.name',
+        nameEn: '$user.nameEn',
+        settledCount: 1,
+        rejectedCount: 1,
+      },
+    },
+    { $sort: { settledCount: -1 } },
+  ]);
+
+  const projectRows = await Custody.aggregate([
+    { $match: custodyMatch },
+    {
+      $group: {
+        _id: '$project',
+        custodiesCount: { $sum: 1 },
+        totalAllocated: { $sum: '$amount' },
+        totalSpent: { $sum: '$spent' },
+        settledCount: {
+          $sum: { $cond: [{ $eq: ['$status', CUSTODY_STATUS.SETTLED] }, 1, 0] },
+        },
+        overBudgetCount: {
+          $sum: { $cond: [{ $gt: ['$spent', '$amount'] }, 1, 0] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: 'projects',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'project',
+      },
+    },
+    { $unwind: { path: '$project', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        projectId: '$_id',
+        name: '$project.name',
+        nameEn: '$project.nameEn',
+        budget: '$project.budget',
+        custodiesCount: 1,
+        totalAllocated: 1,
+        totalSpent: 1,
+        settledCount: 1,
+        overBudgetCount: 1,
+      },
+    },
+    { $sort: { totalSpent: -1 } },
+  ]);
+
+  const totalsAgg = await Custody.aggregate([
+    { $match: custodyMatch },
+    {
+      $group: {
+        _id: null,
+        custodiesCount: { $sum: 1 },
+        totalAllocated: { $sum: '$amount' },
+        totalSpent: { $sum: '$spent' },
+        settledCount: {
+          $sum: { $cond: [{ $eq: ['$status', CUSTODY_STATUS.SETTLED] }, 1, 0] },
+        },
+        overBudgetCount: {
+          $sum: { $cond: [{ $gt: ['$spent', '$amount'] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+
+  const invoiceMatch = projectId ? { project: projectId } : {};
+  const invoiceCount = await Invoice.countDocuments(invoiceMatch);
+
+  return {
+    byManager: managerRows,
+    byAccountant: accountantRows,
+    byChief: chiefRows,
+    byProject: projectRows,
+    totals: {
+      ...(totalsAgg[0] || {
+        custodiesCount: 0,
+        totalAllocated: 0,
+        totalSpent: 0,
+        settledCount: 0,
+        overBudgetCount: 0,
+      }),
+      invoiceCount,
+    },
+  };
+}

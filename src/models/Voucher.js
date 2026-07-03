@@ -8,6 +8,7 @@ const voucherSchema = new mongoose.Schema(
     amount: { type: Number, required: true },
     method: { type: String, enum: ['bank_transfer', 'check'], default: 'bank_transfer' },
     bankReference: String,
+    proofUrl: String,
     voucherDate: { type: Date, default: Date.now },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     custody: { type: mongoose.Schema.Types.ObjectId, ref: 'Custody' },

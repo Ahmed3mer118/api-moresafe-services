@@ -18,6 +18,11 @@ const custodySchema = new mongoose.Schema(
     holder: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     amount: { type: Number, default: 0 },
     spent: { type: Number, default: 0 },
+    submittedSpent: { type: Number, default: 0 },
+    approvedSpent: { type: Number, default: 0 },
+    disbursementAmount: { type: Number },
+    disbursementConfirmedAt: Date,
+    disbursementConfirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     type: { type: String, enum: ['operational', 'emergency'], default: 'operational' },
     purpose: String,
     status: {
@@ -36,12 +41,19 @@ const custodySchema = new mongoose.Schema(
     accrualEntry: [journalLineSchema],
     disbursementEntry: [journalLineSchema],
     financeRejectionReason: String,
+    disbursementProof: String,
+    disbursedAt: Date,
+    disbursedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }
 );
 
 custodySchema.virtual('remaining').get(function remaining() {
-  return Math.max(0, this.amount - this.spent);
+  return (this.amount || 0) - (this.spent || 0);
+});
+
+custodySchema.virtual('overBudget').get(function overBudget() {
+  return (this.spent || 0) > (this.amount || 0);
 });
 
 custodySchema.set('toJSON', { virtuals: true });

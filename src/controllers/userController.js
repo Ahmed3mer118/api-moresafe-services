@@ -112,24 +112,22 @@ export async function listUsers(req, res, next) {
 
 
 
-    if (req.user.role === ROLES.PROJECT_ACCOUNTANT && projectId) {
+    if (req.user.role === ROLES.PROJECT_ACCOUNTANT) {
+      const assignedProjects = await Project.find({ accountants: req.user._id }).select('manager _id').lean();
 
-      const project = await Project.findById(projectId).select('manager').lean();
+      if (projectId) {
+        const project = assignedProjects.find((p) => String(p._id) === String(projectId));
+        if (!project) return res.status(404).json({ message: 'Project not found' });
 
-      if (!project) return res.status(404).json({ message: 'Project not found' });
-
-
-
-      const holderIds = await Custody.distinct('holder', { project: projectId });
-
-      const ids = [
-
-        ...new Set([project.manager, ...holderIds].filter(Boolean).map((id) => String(id))),
-
-      ];
-
-      filter._id = { $in: ids.length ? ids : ['000000000000000000000000'] };
-
+        const holderIds = await Custody.distinct('holder', { project: projectId });
+        const ids = [
+          ...new Set([project.manager, ...holderIds].filter(Boolean).map((id) => String(id))),
+        ];
+        filter._id = { $in: ids.length ? ids : ['000000000000000000000000'] };
+      } else if (role === ROLES.PROJECT_MANAGER) {
+        const managerIds = [...new Set(assignedProjects.map((p) => String(p.manager)).filter(Boolean))];
+        filter._id = { $in: managerIds.length ? managerIds : ['000000000000000000000000'] };
+      }
     }
 
 

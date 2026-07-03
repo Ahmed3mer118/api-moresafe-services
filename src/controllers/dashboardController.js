@@ -18,7 +18,9 @@ import {
   allSuppliers,
   adminAnalyticsSummary,
   projectAccountantReports,
+  adminDisbursementReports,
 } from '../services/dashboardAnalytics.js';
+import { resolvePaProjectIds, countPaQueueCustodies } from '../utils/paProjectAccess.js';
 
 export async function adminDashboard(req, res, next) {
   try {
@@ -45,6 +47,16 @@ export async function adminDashboard(req, res, next) {
       rolesCount: roleChart.labels?.length ?? 0,
       systemStatus: 'online',
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function adminReports(req, res, next) {
+  try {
+    const { projectId } = req.query;
+    const data = await adminDisbursementReports(projectId || undefined);
+    res.json(data);
   } catch (err) {
     next(err);
   }
@@ -82,14 +94,16 @@ export async function financeDashboard(req, res, next) {
 
 export async function projectManagerDashboard(req, res, next) {
   try {
-    const projects = await Project.find({})
-      .select('name nameEn budget spent status manager accountants')
-      .populate('manager', 'name nameEn')
-      .lean({ virtuals: true });
-    const projectIds = projects.map((p) => p._id);
+    const projectIds = await resolvePaProjectIds(req.user._id, req.user.projects);
+    const projects = projectIds.length
+      ? await Project.find({ _id: { $in: projectIds } })
+          .select('name nameEn budget spent status manager accountants')
+          .populate('manager', 'name nameEn')
+          .lean({ virtuals: true })
+      : [];
 
     const [pendingCustodies, managers, totalSpent, custodyChart, reports] = await Promise.all([
-      Custody.countDocuments({ project: { $in: projectIds }, status: CUSTODY_STATUS.CLOSED }),
+      countPaQueueCustodies(projectIds),
       User.countDocuments({ role: ROLES.PROJECT_MANAGER, projects: { $in: projectIds } }),
       Project.aggregate([
         { $match: { _id: { $in: projectIds } } },
@@ -200,8 +214,16 @@ export async function financeReportsSummary(req, res, next) {
 export async function listVouchers(req, res, next) {
   try {
     const vouchers = await Voucher.find()
-      .populate('beneficiary', 'name nameEn')
+      .populate('beneficiary', 'name nameEn email')
       .populate('project', 'name nameEn')
+      .populate({
+        path: 'custody',
+        select: 'custodyNumber settlementNumber accrualEntry disbursementEntry disbursedAt approvedSpent disbursementProof holder project',
+        populate: [
+          { path: 'holder', select: 'name nameEn' },
+          { path: 'project', select: 'name nameEn' },
+        ],
+      })
       .sort({ createdAt: -1 })
       .lean();
     res.json(vouchers);

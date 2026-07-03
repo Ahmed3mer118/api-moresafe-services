@@ -2,10 +2,28 @@ import Invoice, { nextInvoiceReference } from '../models/Invoice.js';
 import Custody from '../models/Custody.js';
 import Project from '../models/Project.js';
 import User from '../models/User.js';
-import { CUSTODY_STATUS, INVOICE_STATUS, ROLES } from '../constants/roles.js';
+import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PM_UPLOAD_CUSTODY_STATUSES } from '../constants/roles.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { createNotification, logActivity } from '../services/notificationService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
+import { recordCustodyTransaction } from '../services/custodyTransactionService.js';
+
+async function resolvePmUploadCustody(custodyId, userId) {
+  const custody = await Custody.findById(custodyId);
+  if (!custody) {
+    return { error: 'Custody not found', status: 404 };
+  }
+  if (String(custody.holder) !== String(userId)) {
+    return { error: 'Custody not assigned to you', status: 403 };
+  }
+  if (!PM_UPLOAD_CUSTODY_STATUSES.includes(custody.status)) {
+    return {
+      error: 'Custody is not available for new invoices at this stage',
+      status: 400,
+    };
+  }
+  return { custody };
+}
 
 async function notifyInvoicePendingApproval(project, invoice) {
   let accountantIds = project.accountants?.length ? [...project.accountants] : [];
@@ -181,14 +199,27 @@ export async function createInvoice(req, res, next) {
       if (String(project.manager) !== String(req.user._id)) {
         return res.status(403).json({ message: 'Project not assigned to you' });
       }
+      if (!custodyId) {
+        return res.status(400).json({ message: 'custodyId is required — upload invoices inside an open custody' });
+      }
     }
 
-    // Custody is optional — invoices save standalone unless custodyId is explicitly sent
     let custody = null;
     if (custodyId) {
-      custody = await Custody.findOne({ _id: custodyId, holder: req.user._id, status: CUSTODY_STATUS.OPEN });
-      if (!custody) {
-        return res.status(400).json({ message: 'Open custody not found for this user' });
+      if (req.user.role === ROLES.PROJECT_MANAGER) {
+        const resolved = await resolvePmUploadCustody(custodyId, req.user._id);
+        if (resolved.error) {
+          return res.status(resolved.status).json({ message: resolved.error });
+        }
+        custody = resolved.custody;
+      } else {
+        custody = await Custody.findOne({ _id: custodyId, status: CUSTODY_STATUS.OPEN });
+        if (!custody) {
+          return res.status(400).json({ message: 'Open custody not found' });
+        }
+      }
+      if (String(custody.project) !== String(projectId)) {
+        return res.status(400).json({ message: 'Project does not match custody' });
       }
     }
 
@@ -217,7 +248,7 @@ export async function createInvoice(req, res, next) {
       taxNumber,
       taxVerified: Boolean(taxNumber),
       invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
-      status: INVOICE_STATUS.PENDING_PM,
+      status: custody ? INVOICE_STATUS.ACCUMULATED : INVOICE_STATUS.PENDING_PM,
       ocrData: ocrData ? (typeof ocrData === 'string' ? JSON.parse(ocrData) : ocrData) : undefined,
       attachments,
       attachmentUrl: attachments[0]?.url,
@@ -227,9 +258,22 @@ export async function createInvoice(req, res, next) {
       custody.invoices.push(invoice._id);
       custody.spent = (custody.spent || 0) + computedTotal;
       await custody.save();
+
+      await recordCustodyTransaction({
+        custodyId: custody._id,
+        type: 'spend',
+        amount: computedTotal,
+        description: `فاتورة ${invoice.referenceNumber}`,
+        descriptionEn: `Invoice ${invoice.referenceNumber}`,
+        referenceType: 'Invoice',
+        referenceId: invoice._id,
+        createdBy: req.user._id,
+      });
     }
 
-    await notifyInvoicePendingApproval(project, invoice);
+    if (!custody) {
+      await notifyInvoicePendingApproval(project, invoice);
+    }
 
     await logActivity({
       userId: req.user._id,
