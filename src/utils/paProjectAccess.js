@@ -23,36 +23,21 @@ export function normalizeProjectIds(refs = []) {
   return [...new Set(refs.map(normalizeProjectRef).filter(Boolean))];
 }
 
-/** Project IDs a custody accountant (PA) may access for reviews. */
+/**
+ * Project IDs a custody accountant (PA) may access.
+ * No explicit assignment → all projects.
+ * One or more assigned projects → only those projects.
+ */
 export async function resolvePaProjectIds(userId, userProjects = []) {
   const fromAccountants = await Project.find({ accountants: userId }).distinct('_id');
-  const ids = new Set([
-    ...normalizeProjectIds(fromAccountants),
-    ...normalizeProjectIds(userProjects),
-  ]);
+  const assigned = normalizeProjectIds([...fromAccountants, ...userProjects]);
 
-  const pendingCustodyIds = await Invoice.distinct('custody', {
-    status: INVOICE_STATUS.PENDING_PM,
-    custody: { $exists: true, $ne: null },
-  });
-
-  const [closedProjects, pendingInvoiceProjects, pendingCustodyProjects] = await Promise.all([
-    Custody.distinct('project', { status: CUSTODY_STATUS.CLOSED }),
-    Invoice.distinct('project', { status: INVOICE_STATUS.PENDING_PM }),
-    pendingCustodyIds.length
-      ? Custody.distinct('project', { _id: { $in: pendingCustodyIds } })
-      : [],
-  ]);
-
-  for (const id of normalizeProjectIds([
-    ...closedProjects,
-    ...pendingInvoiceProjects,
-    ...pendingCustodyProjects,
-  ])) {
-    ids.add(id);
+  if (!assigned.length) {
+    const all = await Project.distinct('_id');
+    return all.map(String);
   }
 
-  return [...ids];
+  return assigned;
 }
 
 /** Custodies with pending_pm invoices stuck in rejected/open — move back to PA queue (closed) */

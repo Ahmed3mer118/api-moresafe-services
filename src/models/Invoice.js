@@ -33,6 +33,8 @@ const invoiceSchema = new mongoose.Schema(
     },
     rejectionReason: String,
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedAt: Date,
     attachmentUrl: String,
     attachments: [
       {

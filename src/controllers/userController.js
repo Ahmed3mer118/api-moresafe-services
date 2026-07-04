@@ -14,6 +14,42 @@ import { escapeRegex } from '../utils/escapeRegex.js';
 
 import { toSafeUserJSON } from '../utils/safeJson.js';
 
+import { resolvePaProjectIds, normalizeProjectIds } from '../utils/paProjectAccess.js';
+
+
+
+async function syncPaProjectLinks(userId, role, projectIds) {
+
+  if (role !== ROLES.PROJECT_ACCOUNTANT) return;
+
+  const ids = normalizeProjectIds(projectIds || []);
+
+  if (!ids.length) {
+
+    await Project.updateMany({ accountants: userId }, { $pull: { accountants: userId } });
+
+    return;
+
+  }
+
+  await Project.updateMany(
+
+    { accountants: userId, _id: { $nin: ids } },
+
+    { $pull: { accountants: userId } },
+
+  );
+
+  await Project.updateMany(
+
+    { _id: { $in: ids } },
+
+    { $addToSet: { accountants: userId } },
+
+  );
+
+}
+
 
 
 function normalizeUserProject(p) {
@@ -113,7 +149,10 @@ export async function listUsers(req, res, next) {
 
 
     if (req.user.role === ROLES.PROJECT_ACCOUNTANT) {
-      const assignedProjects = await Project.find({ accountants: req.user._id }).select('manager _id').lean();
+      const assignedIds = await resolvePaProjectIds(req.user._id, req.user.projects);
+      const assignedProjects = assignedIds.length
+        ? await Project.find({ _id: { $in: assignedIds } }).select('manager _id').lean()
+        : [];
 
       if (projectId) {
         const project = assignedProjects.find((p) => String(p._id) === String(projectId));
@@ -186,13 +225,20 @@ export async function createUser(req, res, next) {
 
   try {
 
-    const { name, nameEn, email, password, role, phone, projects, language } = req.body;
+    const { name, nameEn, email, alternateEmail, password, role, phone, projects, language } = req.body;
 
 
 
     const exists = await User.findOne({ email: email.toLowerCase() }).select('_id').lean();
 
     if (exists) return res.status(400).json({ message: 'Email already exists' });
+
+    if (alternateEmail) {
+      const altExists = await User.findOne({
+        $or: [{ email: alternateEmail.toLowerCase() }, { alternateEmail: alternateEmail.toLowerCase() }],
+      }).select('_id').lean();
+      if (altExists) return res.status(400).json({ message: 'Alternate email already in use' });
+    }
 
 
 
@@ -204,17 +250,23 @@ export async function createUser(req, res, next) {
 
       email,
 
+      alternateEmail: alternateEmail?.toLowerCase()?.trim() || undefined,
+
       password: await hashPassword(password),
 
       role,
 
       phone,
 
-      projects,
+      projects: normalizeProjectIds(projects || []),
 
       language,
 
     });
+
+
+
+    await syncPaProjectLinks(user._id, user.role, user.projects);
 
 
 
@@ -276,7 +328,7 @@ export async function updateUser(req, res, next) {
 
 
 
-    const { name, nameEn, email, role, phone, projects, language, isActive, password } = req.body;
+    const { name, nameEn, email, alternateEmail, role, phone, projects, language, isActive, password } = req.body;
 
 
 
@@ -290,6 +342,18 @@ export async function updateUser(req, res, next) {
 
     }
 
+    if (alternateEmail !== undefined) {
+      const alt = alternateEmail?.toLowerCase()?.trim() || undefined;
+      if (alt) {
+        const altExists = await User.findOne({
+          _id: { $ne: user._id },
+          $or: [{ email: alt }, { alternateEmail: alt }],
+        }).select('_id').lean();
+        if (altExists) return res.status(400).json({ message: 'Alternate email already in use' });
+      }
+      user.alternateEmail = alt;
+    }
+
 
 
     if (name) user.name = name;
@@ -300,7 +364,7 @@ export async function updateUser(req, res, next) {
 
     if (phone !== undefined) user.phone = phone;
 
-    if (projects) user.projects = projects;
+    if (projects !== undefined) user.projects = normalizeProjectIds(projects || []);
 
     if (language) user.language = language;
 
@@ -311,6 +375,8 @@ export async function updateUser(req, res, next) {
 
 
     await user.save();
+
+    await syncPaProjectLinks(user._id, user.role, user.projects);
 
 
 

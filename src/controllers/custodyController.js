@@ -58,7 +58,6 @@ export async function listCustodies(req, res, next) {
       // Admin sees all custodies when no filter
     } else if (role === ROLES.PROJECT_ACCOUNTANT) {
       const assignedIds = await resolvePaProjectIds(_id, req.user.projects);
-      if (!assignedIds.length) return res.json([]);
 
       if (projectId) {
         if (!assignedIds.some((id) => String(id) === String(projectId))) return res.json([]);
@@ -73,13 +72,14 @@ export async function listCustodies(req, res, next) {
           : PA_ARCHIVED_CUSTODY_STATUSES;
         if (!archivedStatuses.length) return res.json([]);
         filter.status = { $in: archivedStatuses };
-      } else {
+      } else if (req.query.queueOnly === 'true') {
         const queueIds = await resolvePaQueueCustodyIds(
           projectId ? [projectId] : assignedIds,
         );
         if (!queueIds.length) return res.json([]);
         filter._id = { $in: queueIds };
-        if (status) filter.status = status;
+      } else if (status) {
+        filter.status = status;
       }
     }
 

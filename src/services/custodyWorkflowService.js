@@ -686,6 +686,8 @@ export class CustodyWorkflowService {
       invoice.status = INVOICE_STATUS.PENDING_FINANCE;
       invoice.rejectionReason = undefined;
       invoice.rejectedBy = undefined;
+      invoice.approvedBy = userId;
+      invoice.approvedAt = new Date();
     } else {
       if (!reason?.trim()) {
         throw Object.assign(new Error('Rejection reason is required'), { status: 400 });

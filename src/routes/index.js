@@ -74,6 +74,7 @@ router.get('/dashboard/admin', authenticate, authorize(ROLES.ADMIN), dashboardCt
 router.get('/dashboard/finance', authenticate, authorize(ROLES.CHIEF_ACCOUNTANT), dashboardCtrl.financeDashboard);
 router.get('/dashboard/project-manager', authenticate, authorize(ROLES.PROJECT_MANAGER), dashboardCtrl.projectAccountantDashboard);
 router.get('/dashboard/project-accountant', authenticate, authorize(ROLES.PROJECT_ACCOUNTANT), dashboardCtrl.projectManagerDashboard);
+router.get('/dashboard/project-accountant/approval-log', authenticate, authorize(ROLES.PROJECT_ACCOUNTANT), dashboardCtrl.paApprovalLog);
 router.get('/dashboard/admin/analytics', authenticate, authorize(ROLES.ADMIN), dashboardCtrl.adminAnalytics);
 router.get('/dashboard/admin/reports', authenticate, authorize(ROLES.ADMIN), dashboardCtrl.adminReports);
 router.get('/dashboard/finance/reports', authenticate, authorize(ROLES.CHIEF_ACCOUNTANT), dashboardCtrl.financeReportsSummary);

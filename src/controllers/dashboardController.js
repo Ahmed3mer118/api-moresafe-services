@@ -341,6 +341,96 @@ export async function markNotificationRead(req, res, next) {
   }
 }
 
+export async function paApprovalLog(req, res, next) {
+  try {
+    const projectIds = await resolvePaProjectIds(req.user._id, req.user.projects);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+    const skip = (page - 1) * limit;
+
+    const [custodyIds, invoiceIds] = await Promise.all([
+      Custody.distinct('_id', { project: { $in: projectIds } }),
+      Invoice.distinct('_id', { project: { $in: projectIds } }),
+    ]);
+
+    const entityClauses = [
+      ...(custodyIds.length ? [{ entityType: 'Custody', entityId: { $in: custodyIds } }] : []),
+      ...(invoiceIds.length ? [{ entityType: 'Invoice', entityId: { $in: invoiceIds } }] : []),
+    ];
+
+    if (!entityClauses.length) {
+      return res.json({ items: [], total: 0, page, limit, totalPages: 1 });
+    }
+
+    const filter = {
+      $and: [
+        {
+          $or: [
+            { action: { $regex: /اعتماد|رفض/ } },
+            { actionEn: { $regex: /Approved|Rejected/i } },
+          ],
+        },
+        { $or: entityClauses },
+      ],
+    };
+
+    const [rawLogs, total] = await Promise.all([
+      ActivityLog.find(filter)
+        .populate('user', 'name nameEn email role')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ActivityLog.countDocuments(filter),
+    ]);
+
+    const logCustodyIds = rawLogs.filter((l) => l.entityType === 'Custody').map((l) => l.entityId);
+    const logInvoiceIds = rawLogs.filter((l) => l.entityType === 'Invoice').map((l) => l.entityId);
+
+    const custodyMap = new Map();
+    const invoiceMap = new Map();
+
+    if (logCustodyIds.length) {
+      const rows = await Custody.find({ _id: { $in: logCustodyIds } })
+        .select('custodyNumber holder pmApprovedBy')
+        .populate('holder', 'name nameEn')
+        .populate('pmApprovedBy', 'name nameEn')
+        .lean();
+      rows.forEach((c) => custodyMap.set(String(c._id), c));
+    }
+
+    if (logInvoiceIds.length) {
+      const rows = await Invoice.find({ _id: { $in: logInvoiceIds } })
+        .select('referenceNumber custody approvedBy')
+        .populate('approvedBy', 'name nameEn')
+        .populate({
+          path: 'custody',
+          select: 'custodyNumber holder',
+          populate: { path: 'holder', select: 'name nameEn' },
+        })
+        .lean();
+      rows.forEach((i) => invoiceMap.set(String(i._id), i));
+    }
+
+    const items = rawLogs.map((log) => ({
+      ...log,
+      custody: log.entityType === 'Custody' ? custodyMap.get(String(log.entityId)) || null : null,
+      invoice: log.entityType === 'Invoice' ? invoiceMap.get(String(log.entityId)) || null : null,
+      outcome: /رفض|Rejected/i.test(`${log.actionEn || ''} ${log.action || ''}`) ? 'rejected' : 'approved',
+    }));
+
+    res.json({
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function listActivityLogs(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
