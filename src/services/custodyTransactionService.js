@@ -11,6 +11,7 @@ export async function recordCustodyTransaction({
   referenceId,
   proofUrl,
   createdBy,
+  journalLines,
 }) {
   const custody = await Custody.findById(custodyId).select('amount spent').lean();
   if (!custody) return null;
@@ -28,6 +29,7 @@ export async function recordCustodyTransaction({
     referenceId,
     proofUrl,
     createdBy,
+    journalLines: journalLines?.length ? journalLines : undefined,
   });
 }
 

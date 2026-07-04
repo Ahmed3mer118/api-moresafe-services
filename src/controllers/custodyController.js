@@ -2,12 +2,12 @@ import Custody, { nextCustodyNumber } from '../models/Custody.js';
 import Invoice from '../models/Invoice.js';
 import Project from '../models/Project.js';
 import mongoose from 'mongoose';
-import { CUSTODY_STATUS, INVOICE_STATUS, ROLES } from '../constants/roles.js';
+import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PA_ARCHIVED_CUSTODY_STATUSES } from '../constants/roles.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { recordCustodyTransaction } from '../services/custodyTransactionService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
 import { createNotification } from '../services/notificationService.js';
-import { resolvePaProjectIds, countPaQueueCustodies } from '../utils/paProjectAccess.js';
+import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairCustodiesWithPendingInvoices, repairSettledCustodyStatus } from '../utils/paProjectAccess.js';
 
 async function resolveProofAttachment(req) {
   if (req.file) {
@@ -24,6 +24,11 @@ async function resolveProofAttachment(req) {
 
 export async function listCustodies(req, res, next) {
   try {
+    await repairCustodiesWithPendingInvoices();
+    await repairCustodiesAwaitingFinance();
+    await repairCustodiesAwaitingDisbursement();
+    await repairSettledCustodyStatus();
+
     const { status, projectId, holderId } = req.query;
     const filter = {};
 
@@ -35,25 +40,25 @@ export async function listCustodies(req, res, next) {
     if (role === ROLES.PROJECT_MANAGER) {
       filter.holder = _id;
     } else if (role === ROLES.CHIEF_ACCOUNTANT && !status) {
-      filter.status = {
-        $in: [CUSTODY_STATUS.PM_APPROVED, CUSTODY_STATUS.FINANCE_PENDING, CUSTODY_STATUS.SETTLED, CUSTODY_STATUS.FINANCE_REJECTED],
-      };
+      const queueIds = await resolveFinanceQueueCustodyIds();
+      filter.$or = [
+        {
+          status: {
+            $in: [
+              CUSTODY_STATUS.PM_APPROVED,
+              CUSTODY_STATUS.FINANCE_PENDING,
+              CUSTODY_STATUS.SETTLED,
+              CUSTODY_STATUS.FINANCE_REJECTED,
+            ],
+          },
+        },
+        ...(queueIds.length ? [{ _id: { $in: queueIds } }] : []),
+      ];
     } else if (role === ROLES.ADMIN && !status) {
       // Admin sees all custodies when no filter
     } else if (role === ROLES.PROJECT_ACCOUNTANT) {
       const assignedIds = await resolvePaProjectIds(_id, req.user.projects);
       if (!assignedIds.length) return res.json([]);
-
-      const pendingPmCustodyIds = await Invoice.distinct('custody', {
-        status: INVOICE_STATUS.PENDING_PM,
-        project: { $in: assignedIds },
-        custody: { $exists: true, $ne: null },
-      });
-
-      const paQueueOr = [
-        { status: CUSTODY_STATUS.CLOSED },
-        ...(pendingPmCustodyIds.length ? [{ _id: { $in: pendingPmCustodyIds } }] : []),
-      ];
 
       if (projectId) {
         if (!assignedIds.some((id) => String(id) === String(projectId))) return res.json([]);
@@ -62,11 +67,19 @@ export async function listCustodies(req, res, next) {
         filter.project = { $in: assignedIds };
       }
 
-      if (status) {
-        filter.$and = [{ status }, { $or: paQueueOr }];
-        delete filter.status;
+      if (req.query.archived === 'true') {
+        const archivedStatuses = status
+          ? PA_ARCHIVED_CUSTODY_STATUSES.filter((s) => s === status)
+          : PA_ARCHIVED_CUSTODY_STATUSES;
+        if (!archivedStatuses.length) return res.json([]);
+        filter.status = { $in: archivedStatuses };
       } else {
-        filter.$or = paQueueOr;
+        const queueIds = await resolvePaQueueCustodyIds(
+          projectId ? [projectId] : assignedIds,
+        );
+        if (!queueIds.length) return res.json([]);
+        filter._id = { $in: queueIds };
+        if (status) filter.status = status;
       }
     }
 
@@ -93,6 +106,11 @@ export async function getCustody(req, res, next) {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(404).json({ message: 'Custody not found' });
     }
+    await repairCustodiesWithPendingInvoices();
+    await repairCustodiesAwaitingFinance();
+    await repairCustodiesAwaitingDisbursement();
+    await repairSettledCustodyStatus();
+
     const custody = await Custody.findById(req.params.id)
       .populate('project')
       .populate('holder', 'name nameEn email')
@@ -283,22 +301,45 @@ export async function listMyTransactions(req, res, next) {
     const CustodyTransaction = (await import('../models/CustodyTransaction.js')).default;
 
     const filter = { holder: req.user._id };
-    const custodies = await Custody.find(filter).select('_id custodyNumber').lean();
+    const custodies = await Custody.find(filter).select('_id custodyNumber accrualEntry disbursementEntry').lean();
     const ids = custodies.map((c) => c._id);
     if (!ids.length) return res.json([]);
 
-    const numberById = new Map(custodies.map((c) => [String(c._id), c.custodyNumber]));
+    const custodyMeta = new Map(
+      custodies.map((c) => [
+        String(c._id),
+        {
+          custodyNumber: c.custodyNumber,
+          accrualEntry: c.accrualEntry,
+          disbursementEntry: c.disbursementEntry,
+        },
+      ]),
+    );
 
-    const rows = await CustodyTransaction.find({ custody: { $in: ids } })
+    const rows = await CustodyTransaction.find({
+      custody: { $in: ids },
+      type: { $in: ['adjustment', 'disbursement'] },
+    })
       .populate('createdBy', 'name nameEn')
       .sort({ createdAt: -1 })
       .lean();
 
     res.json(
-      rows.map((row) => ({
-        ...row,
-        custodyNumber: numberById.get(String(row.custody)) || '',
-      }))
+      rows.map((row) => {
+        const meta = custodyMeta.get(String(row.custody)) || {};
+        return {
+          ...row,
+          custodyNumber: meta.custodyNumber || '',
+          journalLines:
+            row.journalLines?.length
+              ? row.journalLines
+              : row.type === 'adjustment'
+                ? meta.accrualEntry
+                : row.type === 'disbursement'
+                  ? meta.disbursementEntry
+                  : undefined,
+        };
+      }),
     );
   } catch (err) {
     next(err);
@@ -307,6 +348,9 @@ export async function listMyTransactions(req, res, next) {
 
 export async function listDisbursementQueue(req, res, next) {
   try {
+    await repairCustodiesWithPendingInvoices();
+    await repairCustodiesAwaitingDisbursement();
+
     const filter = {
       $or: [
         { status: CUSTODY_STATUS.FINANCE_PENDING },
@@ -333,9 +377,18 @@ export async function listDisbursementQueue(req, res, next) {
 export async function listAdminTransactions(req, res, next) {
   try {
     const CustodyTransaction = (await import('../models/CustodyTransaction.js')).default;
-    const rows = await CustodyTransaction.find({})
+    const rows = await CustodyTransaction.find({
+      type: { $in: ['adjustment', 'disbursement'] },
+    })
       .populate('createdBy', 'name nameEn')
-      .populate({ path: 'custody', select: 'custodyNumber project holder', populate: [{ path: 'project', select: 'name nameEn' }, { path: 'holder', select: 'name nameEn' }] })
+      .populate({
+        path: 'custody',
+        select: 'custodyNumber project holder accrualEntry disbursementEntry',
+        populate: [
+          { path: 'project', select: 'name nameEn' },
+          { path: 'holder', select: 'name nameEn' },
+        ],
+      })
       .sort({ createdAt: -1 })
       .limit(500)
       .lean();
@@ -346,6 +399,14 @@ export async function listAdminTransactions(req, res, next) {
         custodyNumber: row.custody?.custodyNumber || '',
         project: row.custody?.project,
         holder: row.custody?.holder,
+        journalLines:
+          row.journalLines?.length
+            ? row.journalLines
+            : row.type === 'adjustment'
+              ? row.custody?.accrualEntry
+              : row.type === 'disbursement'
+                ? row.custody?.disbursementEntry
+                : undefined,
       })),
     );
   } catch (err) {

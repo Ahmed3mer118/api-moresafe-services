@@ -140,8 +140,61 @@ export async function updateProject(req, res, next) {
 
 export async function projectBudgetSummary(req, res, next) {
   try {
-    const projects = await Project.find().select('name nameEn budget spent status').lean({ virtuals: true });
-    res.json(projects);
+    const filter = {};
+    const { role, _id } = req.user;
+
+    if (role === ROLES.PROJECT_MANAGER) {
+      const custodyProjectIds = await Custody.distinct('project', { holder: _id });
+      const or = [{ manager: _id }];
+      if (custodyProjectIds.length) {
+        or.push({ _id: { $in: custodyProjectIds } });
+      }
+      filter.$or = or;
+    } else if (role === ROLES.PROJECT_ACCOUNTANT) {
+      const assignedIds = await resolvePaProjectIds(_id, req.user.projects);
+      if (!assignedIds.length) {
+        return res.json({
+          projects: [],
+          totals: { projectCount: 0, budget: 0, spent: 0, remaining: 0, overCount: 0, nearCount: 0 },
+        });
+      }
+      filter._id = { $in: assignedIds };
+    }
+
+    const projects = await Project.find(filter)
+      .select('name nameEn budget spent status manager')
+      .populate('manager', 'name nameEn')
+      .sort({ spent: -1 })
+      .lean({ virtuals: true });
+
+    let totalBudget = 0;
+    let totalSpent = 0;
+    let overCount = 0;
+    let nearCount = 0;
+
+    for (const p of projects) {
+      const budget = p.budget || 0;
+      const spent = p.spent || 0;
+      totalBudget += budget;
+      totalSpent += spent;
+      if (budget > 0) {
+        const ratio = spent / budget;
+        if (ratio > 1) overCount += 1;
+        else if (ratio >= 0.9) nearCount += 1;
+      }
+    }
+
+    res.json({
+      projects,
+      totals: {
+        projectCount: projects.length,
+        budget: totalBudget,
+        spent: totalSpent,
+        remaining: Math.max(0, totalBudget - totalSpent),
+        overCount,
+        nearCount,
+      },
+    });
   } catch (err) {
     next(err);
   }

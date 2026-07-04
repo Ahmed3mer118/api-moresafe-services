@@ -1,4 +1,5 @@
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PM_SUBMIT_CUSTODY_STATUSES } from '../constants/roles.js';
+import { repairCustodiesWithPendingInvoices, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairSettledCustodyStatus, promotePaApprovedInvoicesToFinance } from '../utils/paProjectAccess.js';
 import Custody from '../models/Custody.js';
 import Invoice from '../models/Invoice.js';
 import Project from '../models/Project.js';
@@ -6,6 +7,28 @@ import User from '../models/User.js';
 import Voucher, { nextVoucherNumber } from '../models/Voucher.js';
 import { createNotification, logActivity } from './notificationService.js';
 import { recordCustodyTransaction } from './custodyTransactionService.js';
+
+async function notifyPaForCustodySubmission(project, custody, { count, total, resubmit = false }) {
+  let accountantIds = project.accountants?.length ? [...project.accountants] : [];
+  if (!accountantIds.length) {
+    const accountants = await User.find({ role: ROLES.PROJECT_ACCOUNTANT, isActive: true }).select('_id').lean();
+    accountantIds = accountants.map((u) => u._id);
+  }
+
+  await Promise.all(
+    accountantIds.map((accountantId) =>
+      createNotification({
+        userId: accountantId,
+        title: resubmit ? 'إعادة إرسال فواتير عهدة' : 'فواتير عهدة بانتظار المراجعة',
+        titleEn: resubmit ? 'Custody invoices resubmitted' : 'Custody invoices awaiting review',
+        message: `عهدة ${custody.custodyNumber} — ${project.name} (${count} فاتورة · ${total} ريال)`,
+        messageEn: `Custody ${custody.custodyNumber} — ${project.nameEn || project.name} (${count} invoice(s) · ${total} SAR)`,
+        type: 'info',
+        link: '/dashboard/project-accountant/approvals',
+      })
+    )
+  );
+}
 
 function buildAccrualEntry(invoices, holderName) {
   const lines = [];
@@ -15,7 +38,7 @@ function buildAccrualEntry(invoices, holderName) {
     total += inv.total;
     lines.push({
       accountCode: '12011',
-      accountName: `Purchases - ${inv.category || 'Materials'}`,
+      accountName: `Purchases - ${inv.category || 'Materials'} · ${inv.referenceNumber || inv.invoiceNumber || ''}`.trim(),
       debit: inv.total,
       credit: 0,
     });
@@ -29,6 +52,17 @@ function buildAccrualEntry(invoices, holderName) {
   });
 
   return { lines, total };
+}
+
+/** Append new invoice debit lines + credit line without removing existing journal lines */
+function appendAccrualEntry(existing = [], newInvoices, holderName) {
+  const { lines: batchLines } = buildAccrualEntry(newInvoices, holderName);
+  return [...(existing || []), ...batchLines];
+}
+
+function appendDisbursementEntry(existing = [], total, holderName) {
+  const batchLines = buildDisbursementEntry(total, holderName);
+  return [...(existing || []), ...batchLines];
 }
 
 const APPROVED_INVOICE_STATUSES = [
@@ -98,6 +132,14 @@ export class CustodyWorkflowService {
     if (!PM_SUBMIT_CUSTODY_STATUSES.includes(custody.status)) {
       throw Object.assign(new Error('Custody is not open for submission'), { status: 400 });
     }
+
+    const resubmitting = [
+      CUSTODY_STATUS.PM_REJECTED,
+      CUSTODY_STATUS.FINANCE_REJECTED,
+      CUSTODY_STATUS.PM_APPROVED,
+      CUSTODY_STATUS.FINANCE_PENDING,
+      CUSTODY_STATUS.SETTLED,
+    ].includes(custody.status);
     if (String(custody.holder) !== String(userId)) {
       throw Object.assign(new Error('Not your custody'), { status: 403 });
     }
@@ -129,9 +171,14 @@ export class CustodyWorkflowService {
       status: INVOICE_STATUS.ACCUMULATED,
     });
 
+    if (resubmitting) {
+      custody.pmRejectionReason = undefined;
+      custody.financeRejectionReason = undefined;
+    }
+
     if (remainingAccumulated) {
       custody.status = CUSTODY_STATUS.OPEN;
-    } else if (custody.status === CUSTODY_STATUS.OPEN) {
+    } else {
       custody.status = CUSTODY_STATUS.CLOSED;
       custody.closedAt = new Date();
     }
@@ -172,20 +219,12 @@ export class CustodyWorkflowService {
     await custody.save();
 
     const project = await Project.findById(custody.project).populate('manager');
-    if (project?.accountants?.length) {
-      await Promise.all(
-        project.accountants.map((accountantId) =>
-          createNotification({
-            userId: accountantId,
-            title: 'فواتير عهدة بانتظار المراجعة',
-            titleEn: 'Custody invoices awaiting review',
-            message: `عهدة ${custody.custodyNumber} — ${project.name} (${selectedTotal} ريال)`,
-            messageEn: `Custody ${custody.custodyNumber} — ${project.nameEn || project.name}`,
-            type: 'info',
-            link: '/dashboard/project-accountant/approvals',
-          })
-        )
-      );
+    if (project) {
+      await notifyPaForCustodySubmission(project, custody, {
+        count: invoices.length,
+        total: selectedTotal,
+        resubmit: resubmitting,
+      });
     }
 
     if (custody.spent > custody.amount) {
@@ -305,19 +344,17 @@ export class CustodyWorkflowService {
       if (!toSettle.length) {
         throw Object.assign(new Error('No approved invoices to settle'), { status: 400 });
       }
-      const { lines, total } = buildAccrualEntry(toSettle, custody.holder.name);
+      const { lines: batchLines, total } = buildAccrualEntry(toSettle, custody.holder.name);
       const settlementCount = await Custody.countDocuments({ status: CUSTODY_STATUS.SETTLED });
 
       custody.status = CUSTODY_STATUS.FINANCE_PENDING;
-      custody.settlementNumber = `STL-${440 + settlementCount}`;
-      custody.accrualEntry = lines;
-      custody.disbursementEntry = undefined;
-      custody.disbursementAmount = undefined;
-      custody.disbursementConfirmedAt = undefined;
-      custody.disbursementConfirmedBy = undefined;
+      if (!custody.settlementNumber) {
+        custody.settlementNumber = `STL-${440 + settlementCount}`;
+      }
+      custody.accrualEntry = appendAccrualEntry(custody.accrualEntry, toSettle, custody.holder.name);
 
       await Invoice.updateMany(
-        { custody: custodyId, status: INVOICE_STATUS.PENDING_FINANCE },
+        { _id: { $in: toSettle.map((i) => i._id) }, status: INVOICE_STATUS.PENDING_FINANCE },
         { status: INVOICE_STATUS.FINANCE_APPROVED }
       );
 
@@ -325,11 +362,12 @@ export class CustodyWorkflowService {
         custodyId: custody._id,
         type: 'adjustment',
         amount: total,
-        description: `قيد استحقاق — ${custody.custodyNumber}`,
-        descriptionEn: `Accrual entry — ${custody.custodyNumber}`,
+        description: `قيد استحقاق — ${custody.custodyNumber}${toSettle.length === 1 ? ` · ${toSettle[0].referenceNumber}` : ` · ${toSettle.length} فواتير`}`,
+        descriptionEn: `Accrual entry — ${custody.custodyNumber}${toSettle.length === 1 ? ` · ${toSettle[0].referenceNumber}` : ` · ${toSettle.length} invoice(s)`}`,
         referenceType: 'Custody',
         referenceId: custody._id,
         createdBy: userId,
+        journalLines: batchLines,
       });
 
       const admins = await User.find({ role: ROLES.ADMIN, isActive: true }).select('_id').lean();
@@ -342,7 +380,7 @@ export class CustodyWorkflowService {
             message: `${custody.custodyNumber} — ${total} ريال`,
             messageEn: `${custody.custodyNumber} — ${total} SAR`,
             type: 'info',
-            link: '/dashboard/admin/disbursement',
+            link: '/dashboard/admin/vouchers',
           })
         )
       );
@@ -444,13 +482,14 @@ export class CustodyWorkflowService {
     custody.status = CUSTODY_STATUS.SETTLED;
     custody.settledAt = new Date();
     custody.settledBy = userId;
-    custody.disbursementEntry = buildDisbursementEntry(total, custody.holder.name);
+    const batchDisbursementLines = buildDisbursementEntry(total, custody.holder.name);
+    custody.disbursementEntry = appendDisbursementEntry(custody.disbursementEntry, total, custody.holder.name);
     custody.disbursementProof = proofUrl;
     custody.disbursedAt = new Date();
     custody.disbursedBy = userId;
 
     await Invoice.updateMany(
-      { custody: custodyId, status: INVOICE_STATUS.FINANCE_APPROVED },
+      { _id: { $in: invoices.map((i) => i._id) }, status: INVOICE_STATUS.FINANCE_APPROVED },
       { status: INVOICE_STATUS.SETTLED }
     );
 
@@ -483,6 +522,7 @@ export class CustodyWorkflowService {
       referenceId: custody._id,
       proofUrl,
       createdBy: userId,
+      journalLines: batchDisbursementLines,
     });
 
     await createNotification({
@@ -553,31 +593,58 @@ export class CustodyWorkflowService {
   }
 
   async syncCustodyAfterInvoiceReviews(custodyId, userId) {
+    await repairCustodiesWithPendingInvoices();
+    await promotePaApprovedInvoicesToFinance();
+    await repairCustodiesAwaitingFinance();
+    await repairCustodiesAwaitingDisbursement();
+    await repairSettledCustodyStatus();
+
     const custody = await Custody.findById(custodyId).populate('holder');
-    if (!custody || custody.status !== CUSTODY_STATUS.CLOSED) return;
+    if (!custody) return;
+
+    const syncableStatuses = [
+      CUSTODY_STATUS.CLOSED,
+      CUSTODY_STATUS.OPEN,
+      CUSTODY_STATUS.PM_REJECTED,
+      CUSTODY_STATUS.FINANCE_REJECTED,
+      CUSTODY_STATUS.SETTLED,
+      CUSTODY_STATUS.PM_APPROVED,
+    ];
+    if (!syncableStatuses.includes(custody.status)) return;
 
     const invoices = await Invoice.find({ custody: custodyId });
-    const stillPending = invoices.some((i) => i.status === INVOICE_STATUS.PENDING_PM);
-    if (stillPending) return;
+    const stillPendingPa = invoices.some((i) => i.status === INVOICE_STATUS.PENDING_PM);
 
     const pmApproved = invoices.filter((i) => i.status === INVOICE_STATUS.PM_APPROVED);
     if (pmApproved.length) {
       await Invoice.updateMany(
-        { custody: custodyId, status: INVOICE_STATUS.PM_APPROVED },
-        { status: INVOICE_STATUS.PENDING_FINANCE }
+        { _id: { $in: pmApproved.map((i) => i._id) } },
+        { $set: { status: INVOICE_STATUS.PENDING_FINANCE } },
       );
+    }
 
-      const refreshed = await Invoice.find({ custody: custodyId });
+    const refreshed = await Invoice.find({ custody: custodyId });
+    const pendingFinance = refreshed.filter((i) => i.status === INVOICE_STATUS.PENDING_FINANCE);
+    const priorBatchComplete = refreshed.some((i) =>
+      [
+        INVOICE_STATUS.SETTLED,
+        INVOICE_STATUS.FINANCE_APPROVED,
+      ].includes(i.status)
+    );
+
+    if (pendingFinance.length) {
+      const batchJustApproved = pmApproved.length ? pmApproved : pendingFinance;
       custody.status = CUSTODY_STATUS.PM_APPROVED;
       custody.pmApprovedAt = new Date();
       custody.pmApprovedBy = userId;
+      custody.pmRejectionReason = undefined;
       custody.approvedSpent = sumInvoices(refreshed, FINANCE_ELIGIBLE_STATUSES);
 
-      const approvedTotal = pmApproved.reduce((s, i) => s + (i.total || 0), 0);
+      const approvedTotal = batchJustApproved.reduce((s, i) => s + (i.total || 0), 0);
       const approver = await User.findById(userId).select('name nameEn').lean();
       const approverName = approver?.name || approver?.nameEn || 'محاسب العهد';
 
-      if (custody.holder) {
+      if (custody.holder && pmApproved.length) {
         await createNotification({
           userId: custody.holder._id,
           title: 'اعتماد العهدة من محاسب العهد',
@@ -589,23 +656,41 @@ export class CustodyWorkflowService {
         });
       }
 
-      const accountants = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true });
-      await Promise.all(
-        accountants.map((a) =>
-          createNotification({
-            userId: a._id,
-            title: 'عهدة معتمدة — بانتظار المالية',
-            titleEn: 'Approved custody — pending finance',
-            message: `${custody.custodyNumber} — ${pmApproved.length} فاتورة (${approvedTotal} ريال)`,
-            messageEn: `${custody.custodyNumber} — ${pmApproved.length} invoice(s) (${approvedTotal} SAR)`,
-            type: 'info',
-            link: '/dashboard/finance/review',
-          })
-        )
-      );
-    } else {
+      if (pmApproved.length) {
+        const accountants = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true });
+        await Promise.all(
+          accountants.map((a) =>
+            createNotification({
+              userId: a._id,
+              title: 'فواتير معتمدة — بانتظار المالية',
+              titleEn: 'Approved invoices — pending finance',
+              message: `${custody.custodyNumber} — ${pmApproved.length} فاتورة (${approvedTotal} ريال)`,
+              messageEn: `${custody.custodyNumber} — ${pmApproved.length} invoice(s) (${approvedTotal} SAR)`,
+              type: 'info',
+              link: '/dashboard/finance/entries',
+            })
+          )
+        );
+      }
+    } else if (stillPendingPa) {
+      const financeApproved = refreshed.filter((i) => i.status === INVOICE_STATUS.FINANCE_APPROVED);
+      const settledInvoices = refreshed.filter((i) => i.status === INVOICE_STATUS.SETTLED);
+      if (financeApproved.length) {
+        custody.status = CUSTODY_STATUS.FINANCE_PENDING;
+      } else if (custody.settledAt || custody.disbursementProof || settledInvoices.length) {
+        custody.status = CUSTODY_STATUS.SETTLED;
+      } else {
+        custody.status = CUSTODY_STATUS.CLOSED;
+        custody.closedAt = custody.closedAt || new Date();
+      }
+    } else if (!priorBatchComplete) {
       custody.status = CUSTODY_STATUS.PM_REJECTED;
       custody.pmRejectionReason = custody.pmRejectionReason || 'رفض جميع الفواتير';
+    } else if (
+      custody.status === CUSTODY_STATUS.CLOSED
+      && refreshed.some((i) => i.status === INVOICE_STATUS.SETTLED)
+    ) {
+      custody.status = CUSTODY_STATUS.SETTLED;
     }
 
     await custody.save();
@@ -625,7 +710,7 @@ export class CustodyWorkflowService {
     }
 
     if (approved) {
-      invoice.status = INVOICE_STATUS.PM_APPROVED;
+      invoice.status = INVOICE_STATUS.PENDING_FINANCE;
       invoice.rejectionReason = undefined;
       invoice.rejectedBy = undefined;
     } else {

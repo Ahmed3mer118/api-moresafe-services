@@ -27,7 +27,7 @@ router.get('/users/stats', authenticate, authorize(ROLES.ADMIN), userCtrl.getUse
 
 // Projects
 router.get('/projects', authenticate, projectCtrl.listProjects);
-router.get('/projects/budgets', authenticate, authorize(ROLES.ADMIN, ROLES.CHIEF_ACCOUNTANT), projectCtrl.projectBudgetSummary);
+router.get('/projects/budgets', authenticate, projectCtrl.projectBudgetSummary);
 router.get('/projects/:id', authenticate, projectCtrl.getProject);
 router.post('/projects', authenticate, authorize(ROLES.ADMIN), projectCtrl.createProject);
 router.patch('/projects/:id', authenticate, authorize(ROLES.ADMIN), projectCtrl.updateProject);

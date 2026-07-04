@@ -16,6 +16,14 @@ const custodyTransactionSchema = new mongoose.Schema(
     referenceId: mongoose.Schema.Types.ObjectId,
     proofUrl: String,
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    journalLines: [
+      {
+        accountCode: String,
+        accountName: String,
+        debit: { type: Number, default: 0 },
+        credit: { type: Number, default: 0 },
+      },
+    ],
   },
   { timestamps: true }
 );

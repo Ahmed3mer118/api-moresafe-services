@@ -22,17 +22,35 @@ export const CUSTODY_STATUS = {
   FINANCE_REJECTED: 'finance_rejected',
 };
 
-/** PM may attach new invoices while custody is still in their active cycle */
+/** PM may attach new invoices at any time — including after settlement */
 export const PM_UPLOAD_CUSTODY_STATUSES = [
   CUSTODY_STATUS.OPEN,
   CUSTODY_STATUS.CLOSED,
   CUSTODY_STATUS.PM_REJECTED,
+  CUSTODY_STATUS.PM_APPROVED,
+  CUSTODY_STATUS.FINANCE_PENDING,
+  CUSTODY_STATUS.FINANCE_REJECTED,
+  CUSTODY_STATUS.SETTLED,
 ];
 
-/** PM may submit accumulated invoices for PA review */
+/** PM may submit accumulated invoices for PA review at any time */
 export const PM_SUBMIT_CUSTODY_STATUSES = [
   CUSTODY_STATUS.OPEN,
   CUSTODY_STATUS.CLOSED,
+  CUSTODY_STATUS.PM_REJECTED,
+  CUSTODY_STATUS.PM_APPROVED,
+  CUSTODY_STATUS.FINANCE_PENDING,
+  CUSTODY_STATUS.FINANCE_REJECTED,
+  CUSTODY_STATUS.SETTLED,
+];
+
+/** Custodies processed by project accountant — shown in PA archive */
+export const PA_ARCHIVED_CUSTODY_STATUSES = [
+  CUSTODY_STATUS.PM_APPROVED,
+  CUSTODY_STATUS.PM_REJECTED,
+  CUSTODY_STATUS.FINANCE_PENDING,
+  CUSTODY_STATUS.SETTLED,
+  CUSTODY_STATUS.FINANCE_REJECTED,
 ];
 
 export const INVOICE_STATUS = {

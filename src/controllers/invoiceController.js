@@ -3,6 +3,7 @@ import Custody from '../models/Custody.js';
 import Project from '../models/Project.js';
 import User from '../models/User.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PM_UPLOAD_CUSTODY_STATUSES } from '../constants/roles.js';
+import { resolvePaProjectIds, repairCustodiesWithPendingInvoices, repairCustodiesAwaitingFinance } from '../utils/paProjectAccess.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { createNotification, logActivity } from '../services/notificationService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
@@ -132,6 +133,19 @@ export async function listInvoices(req, res, next) {
 
     if (req.user.role === ROLES.PROJECT_MANAGER) {
       filter.uploadedBy = req.user._id;
+    } else if (req.user.role === ROLES.PROJECT_ACCOUNTANT) {
+      const assignedIds = await resolvePaProjectIds(req.user._id, req.user.projects);
+      if (!assignedIds.length) return res.json([]);
+      if (projectId) {
+        if (!assignedIds.some((id) => String(id) === String(projectId))) return res.json([]);
+        filter.project = projectId;
+      } else {
+        filter.project = { $in: assignedIds };
+      }
+      if (status === INVOICE_STATUS.PENDING_PM) {
+        await repairCustodiesWithPendingInvoices();
+        await repairCustodiesAwaitingFinance();
+      }
     }
 
     const invoices = await Invoice.find(filter)
@@ -431,18 +445,13 @@ export async function updateInvoice(req, res, next) {
 
     Object.assign(invoice, req.body);
 
-    if (wasRejected || invoice.status.includes('rejected')) {
-      invoice.status = INVOICE_STATUS.PENDING_PM;
+    if (wasRejected || String(invoice.status).includes('rejected')) {
+      invoice.status = INVOICE_STATUS.ACCUMULATED;
       invoice.rejectionReason = undefined;
       invoice.rejectedBy = undefined;
     }
 
     await invoice.save();
-
-    if (wasRejected) {
-      const project = invoice.project?._id ? invoice.project : await Project.findById(invoice.project);
-      if (project) await notifyInvoicePendingApproval(project, invoice);
-    }
 
     res.json(invoice);
   } catch (err) {
