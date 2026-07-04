@@ -7,6 +7,12 @@ import User from '../models/User.js';
 import Voucher, { nextVoucherNumber } from '../models/Voucher.js';
 import { createNotification, logActivity } from './notificationService.js';
 import { recordCustodyTransaction } from './custodyTransactionService.js';
+import {
+  buildAccrualEntry,
+  buildDisbursementEntry,
+  appendAccrualEntry,
+  appendDisbursementEntry,
+} from '../utils/journalEntries.js';
 
 async function notifyPaForCustodySubmission(project, custody, { count, total, resubmit = false }) {
   let accountantIds = project.accountants?.length ? [...project.accountants] : [];
@@ -28,41 +34,6 @@ async function notifyPaForCustodySubmission(project, custody, { count, total, re
       })
     )
   );
-}
-
-function buildAccrualEntry(invoices, holderName) {
-  const lines = [];
-  let total = 0;
-
-  for (const inv of invoices) {
-    total += inv.total;
-    lines.push({
-      accountCode: '12011',
-      accountName: `Purchases - ${inv.category || 'Materials'} · ${inv.referenceNumber || inv.invoiceNumber || ''}`.trim(),
-      debit: inv.total,
-      credit: 0,
-    });
-  }
-
-  lines.push({
-    accountCode: '23041',
-    accountName: `Engineer custody - ${holderName}`,
-    debit: 0,
-    credit: total,
-  });
-
-  return { lines, total };
-}
-
-/** Append new invoice debit lines + credit line without removing existing journal lines */
-function appendAccrualEntry(existing = [], newInvoices, holderName) {
-  const { lines: batchLines } = buildAccrualEntry(newInvoices, holderName);
-  return [...(existing || []), ...batchLines];
-}
-
-function appendDisbursementEntry(existing = [], total, holderName) {
-  const batchLines = buildDisbursementEntry(total, holderName);
-  return [...(existing || []), ...batchLines];
 }
 
 const APPROVED_INVOICE_STATUSES = [
@@ -106,23 +77,6 @@ async function recalcCustodyTotals(custodyId) {
   custody.approvedSpent = sumInvoices(invoices, APPROVED_INVOICE_STATUSES);
   await custody.save();
   return custody;
-}
-
-function buildDisbursementEntry(total, holderName) {
-  return [
-    {
-      accountCode: '23041',
-      accountName: `Engineer custody - ${holderName}`,
-      debit: total,
-      credit: 0,
-    },
-    {
-      accountCode: '11010',
-      accountName: 'Bank',
-      debit: 0,
-      credit: total,
-    },
-  ];
 }
 
 export class CustodyWorkflowService {
@@ -329,7 +283,13 @@ export class CustodyWorkflowService {
       .populate('holder', 'name nameEn');
     if (!custody) throw Object.assign(new Error('Custody not found'), { status: 404 });
     if (custody.status !== CUSTODY_STATUS.PM_APPROVED) {
-      throw Object.assign(new Error('Custody not ready for settlement'), { status: 400 });
+      const hasPendingFinance = await Invoice.exists({
+        custody: custodyId,
+        status: INVOICE_STATUS.PENDING_FINANCE,
+      });
+      if (!(custody.status === CUSTODY_STATUS.SETTLED && hasPendingFinance)) {
+        throw Object.assign(new Error('Custody not ready for settlement'), { status: 400 });
+      }
     }
 
     const invoices = await Invoice.find({
@@ -483,6 +443,7 @@ export class CustodyWorkflowService {
     custody.settledAt = new Date();
     custody.settledBy = userId;
     const batchDisbursementLines = buildDisbursementEntry(total, custody.holder.name);
+    const { lines: batchAccrualLines } = buildAccrualEntry(invoices, custody.holder.name);
     custody.disbursementEntry = appendDisbursementEntry(custody.disbursementEntry, total, custody.holder.name);
     custody.disbursementProof = proofUrl;
     custody.disbursedAt = new Date();
@@ -496,7 +457,11 @@ export class CustodyWorkflowService {
     const project = await Project.findById(custody.project);
     if (project) {
       project.spent += total;
-      if (project.budget && project.spent / project.budget >= 0.9) project.status = 'near_budget';
+      if (project.budget && project.spent > project.budget) {
+        project.status = 'over_budget';
+      } else if (project.budget && project.spent / project.budget >= 0.9) {
+        project.status = 'near_budget';
+      }
       await project.save();
     }
 
@@ -510,6 +475,9 @@ export class CustodyWorkflowService {
       proofUrl,
       createdBy: userId,
       custody: custody._id,
+      invoiceIds: invoices.map((i) => i._id),
+      accrualEntry: batchAccrualLines,
+      disbursementEntry: batchDisbursementLines,
     });
 
     await recordCustodyTransaction({
@@ -691,6 +659,11 @@ export class CustodyWorkflowService {
       && refreshed.some((i) => i.status === INVOICE_STATUS.SETTLED)
     ) {
       custody.status = CUSTODY_STATUS.SETTLED;
+    }
+
+    const postSyncInvoices = await Invoice.find({ custody: custodyId });
+    if (postSyncInvoices.some((i) => i.status === INVOICE_STATUS.FINANCE_APPROVED)) {
+      custody.status = CUSTODY_STATUS.FINANCE_PENDING;
     }
 
     await custody.save();

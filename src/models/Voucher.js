@@ -1,5 +1,15 @@
 import mongoose from 'mongoose';
 
+const journalLineSchema = new mongoose.Schema(
+  {
+    accountCode: String,
+    accountName: String,
+    debit: { type: Number, default: 0 },
+    credit: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
 const voucherSchema = new mongoose.Schema(
   {
     voucherNumber: { type: String, unique: true, sparse: true },
@@ -12,6 +22,9 @@ const voucherSchema = new mongoose.Schema(
     voucherDate: { type: Date, default: Date.now },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     custody: { type: mongoose.Schema.Types.ObjectId, ref: 'Custody' },
+    invoiceIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Invoice' }],
+    accrualEntry: [journalLineSchema],
+    disbursementEntry: [journalLineSchema],
   },
   { timestamps: true }
 );

@@ -5,6 +5,8 @@ import Invoice from '../models/Invoice.js';
 import Notification from '../models/Notification.js';
 import ActivityLog from '../models/ActivityLog.js';
 import Voucher, { nextVoucherNumber } from '../models/Voucher.js';
+import { resolveVoucherJournalEntries } from '../utils/voucherJournal.js';
+import { accrualDebitTotal } from '../utils/journalEntries.js';
 import Settings from '../models/Settings.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES } from '../constants/roles.js';
 import {
@@ -213,12 +215,12 @@ export async function financeReportsSummary(req, res, next) {
 
 export async function listVouchers(req, res, next) {
   try {
-    const vouchers = await Voucher.find()
+    const rows = await Voucher.find()
       .populate('beneficiary', 'name nameEn email')
       .populate('project', 'name nameEn')
       .populate({
         path: 'custody',
-        select: 'custodyNumber settlementNumber accrualEntry disbursementEntry disbursedAt approvedSpent disbursementProof holder project',
+        select: 'custodyNumber settlementNumber disbursedAt approvedSpent disbursementProof holder project',
         populate: [
           { path: 'holder', select: 'name nameEn' },
           { path: 'project', select: 'name nameEn' },
@@ -226,6 +228,38 @@ export async function listVouchers(req, res, next) {
       })
       .sort({ createdAt: -1 })
       .lean();
+
+    const vouchers = await Promise.all(
+      rows.map(async (v) => {
+        const journals = await resolveVoucherJournalEntries(v);
+        const storedAccrualTotal = accrualDebitTotal(v.accrualEntry);
+        const resolvedAccrualTotal = accrualDebitTotal(journals.accrualEntry);
+        const needsPersist =
+          !v.accrualEntry?.length
+          || !v.disbursementEntry?.length
+          || Math.abs(storedAccrualTotal - resolvedAccrualTotal) > 0.01
+          || Math.abs(storedAccrualTotal - Number(v.amount || 0)) > 0.01;
+
+        if (needsPersist && (journals.accrualEntry?.length || journals.disbursementEntry?.length)) {
+          await Voucher.updateOne(
+            { _id: v._id },
+            {
+              $set: {
+                ...(journals.accrualEntry?.length ? { accrualEntry: journals.accrualEntry } : {}),
+                ...(journals.disbursementEntry?.length ? { disbursementEntry: journals.disbursementEntry } : {}),
+              },
+            },
+          );
+        }
+
+        return {
+          ...v,
+          accrualEntry: journals.accrualEntry,
+          disbursementEntry: journals.disbursementEntry,
+        };
+      }),
+    );
+
     res.json(vouchers);
   } catch (err) {
     next(err);

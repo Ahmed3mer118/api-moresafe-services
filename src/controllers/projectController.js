@@ -165,7 +165,13 @@ export async function projectBudgetSummary(req, res, next) {
       .select('name nameEn budget spent status manager')
       .populate('manager', 'name nameEn')
       .sort({ spent: -1 })
-      .lean({ virtuals: true });
+      .lean({ virtuals: true })
+      .then((rows) =>
+        rows.map((p) => ({
+          ...p,
+          status: p.budget > 0 && p.spent > p.budget ? 'over_budget' : p.status,
+        })),
+      );
 
     let totalBudget = 0;
     let totalSpent = 0;

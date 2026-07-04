@@ -146,7 +146,15 @@ export async function repairCustodiesAwaitingFinance() {
   );
 }
 
-/** Custodies settled by finance (finance_approved invoices) stuck in closed — restore disbursement queue */
+/** Custodies with finance_approved invoices awaiting bank disbursement */
+export async function resolveDisbursementQueueCustodyIds() {
+  return Invoice.distinct('custody', {
+    status: INVOICE_STATUS.FINANCE_APPROVED,
+    custody: { $exists: true, $ne: null },
+  }).then((ids) => ids.map(String));
+}
+
+/** Custodies settled by finance (finance_approved invoices) stuck in closed/settled — restore disbursement queue */
 export async function repairCustodiesAwaitingDisbursement() {
   const custodyIds = await Invoice.distinct('custody', {
     status: INVOICE_STATUS.FINANCE_APPROVED,
@@ -164,6 +172,7 @@ export async function repairCustodiesAwaitingDisbursement() {
           CUSTODY_STATUS.PM_APPROVED,
           CUSTODY_STATUS.PM_REJECTED,
           CUSTODY_STATUS.FINANCE_REJECTED,
+          CUSTODY_STATUS.SETTLED,
         ],
       },
     },
@@ -173,16 +182,23 @@ export async function repairCustodiesAwaitingDisbursement() {
 
 /** Custodies that finished disbursement but status was downgraded (e.g. by repair) */
 export async function repairSettledCustodyStatus() {
-  await Custody.updateMany(
-    {
-      $or: [
-        { settledAt: { $exists: true, $ne: null } },
-        { disbursementProof: { $exists: true, $ne: null } },
-      ],
-      status: { $ne: CUSTODY_STATUS.SETTLED },
-    },
-    { $set: { status: CUSTODY_STATUS.SETTLED } },
-  );
+  const awaitingDisbursementIds = await Invoice.distinct('custody', {
+    status: INVOICE_STATUS.FINANCE_APPROVED,
+    custody: { $exists: true, $ne: null },
+  });
+
+  const filter = {
+    $or: [
+      { settledAt: { $exists: true, $ne: null } },
+      { disbursementProof: { $exists: true, $ne: null } },
+    ],
+    status: { $ne: CUSTODY_STATUS.SETTLED },
+  };
+  if (awaitingDisbursementIds.length) {
+    filter._id = { $nin: awaitingDisbursementIds };
+  }
+
+  await Custody.updateMany(filter, { $set: { status: CUSTODY_STATUS.SETTLED } });
 }
 
 /** Custody IDs chief accountant must see (new resubmit batch ready for settlement) */

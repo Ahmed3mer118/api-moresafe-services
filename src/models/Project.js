@@ -10,7 +10,7 @@ const projectSchema = new mongoose.Schema(
     spent: { type: Number, default: 0 },
     status: {
       type: String,
-      enum: ['active', 'near_budget', 'new', 'closed'],
+      enum: ['active', 'near_budget', 'over_budget', 'new', 'closed'],
       default: 'active',
     },
     manager: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

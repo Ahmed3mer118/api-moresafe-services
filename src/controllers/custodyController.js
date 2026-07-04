@@ -7,7 +7,7 @@ import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { recordCustodyTransaction } from '../services/custodyTransactionService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
 import { createNotification } from '../services/notificationService.js';
-import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairCustodiesWithPendingInvoices, repairSettledCustodyStatus } from '../utils/paProjectAccess.js';
+import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, resolveFinanceQueueCustodyIds, resolveDisbursementQueueCustodyIds, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairCustodiesWithPendingInvoices, repairSettledCustodyStatus } from '../utils/paProjectAccess.js';
 
 async function resolveProofAttachment(req) {
   if (req.file) {
@@ -351,10 +351,13 @@ export async function listDisbursementQueue(req, res, next) {
     await repairCustodiesWithPendingInvoices();
     await repairCustodiesAwaitingDisbursement();
 
+    const queueIds = await resolveDisbursementQueueCustodyIds();
+
     const filter = {
       $or: [
         { status: CUSTODY_STATUS.FINANCE_PENDING },
         { status: CUSTODY_STATUS.OPEN, $expr: { $gt: ['$spent', '$amount'] } },
+        ...(queueIds.length ? [{ _id: { $in: queueIds } }] : []),
       ],
     };
 
