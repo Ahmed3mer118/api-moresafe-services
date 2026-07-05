@@ -23,6 +23,7 @@ import {
   adminDisbursementReports,
 } from '../services/dashboardAnalytics.js';
 import { resolvePaProjectIds, countPaQueueCustodies } from '../utils/paProjectAccess.js';
+import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 export async function adminDashboard(req, res, next) {
   try {
@@ -215,7 +216,13 @@ export async function financeReportsSummary(req, res, next) {
 
 export async function listVouchers(req, res, next) {
   try {
-    const rows = await Voucher.find()
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'amount', 'voucherNumber'],
+    });
+    let filter = {};
+    filter = applySearchToFilter(filter, search, ['voucherNumber', 'bankReference']);
+
+    const rows = await Voucher.find(filter)
       .populate('beneficiary', 'name nameEn email')
       .populate('project', 'name nameEn')
       .populate({
@@ -226,8 +233,12 @@ export async function listVouchers(req, res, next) {
           { path: 'project', select: 'name nameEn' },
         ],
       })
-      .sort({ createdAt: -1 })
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
       .lean();
+
+    const total = await Voucher.countDocuments(filter);
 
     const vouchers = await Promise.all(
       rows.map(async (v) => {
@@ -260,7 +271,13 @@ export async function listVouchers(req, res, next) {
       }),
     );
 
-    res.json(vouchers);
+    res.json({
+      items: vouchers,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    });
   } catch (err) {
     next(err);
   }
@@ -318,12 +335,29 @@ export async function updateSettings(req, res, next) {
 
 export async function listNotifications(req, res, next) {
   try {
-    const notifications = await Notification.find({ user: req.user._id })
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .lean();
-    const unread = await Notification.countDocuments({ user: req.user._id, isRead: false });
-    res.json({ notifications, unread });
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt'],
+      defaultLimit: 20,
+      maxLimit: 50,
+    });
+    let filter = { user: req.user._id };
+    filter = applySearchToFilter(filter, search, ['title', 'titleEn', 'message', 'messageEn']);
+
+    const [notifications, total, unread] = await Promise.all([
+      Notification.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      Notification.countDocuments(filter),
+      Notification.countDocuments({ user: req.user._id, isRead: false }),
+    ]);
+
+    res.json({
+      notifications,
+      unread,
+      items: notifications,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    });
   } catch (err) {
     next(err);
   }
@@ -433,18 +467,22 @@ export async function paApprovalLog(req, res, next) {
 
 export async function listActivityLogs(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 15, 1), 50);
-    const skip = (page - 1) * limit;
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'action'],
+      defaultLimit: 15,
+      maxLimit: 50,
+    });
+    let filter = {};
+    filter = applySearchToFilter(filter, search, ['action', 'actionEn']);
 
     const [logs, total] = await Promise.all([
-      ActivityLog.find()
+      ActivityLog.find(filter)
         .populate('user', 'name nameEn role')
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limit)
         .lean(),
-      ActivityLog.countDocuments(),
+      ActivityLog.countDocuments(filter),
     ]);
 
     res.json({
@@ -461,11 +499,19 @@ export async function listActivityLogs(req, res, next) {
 
 export async function taxCompliance(req, res, next) {
   try {
-    const invoices = await Invoice.find({ taxNumber: { $exists: true } })
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'total', 'referenceNumber', 'taxVerified'],
+    });
+    let filter = { taxNumber: { $exists: true } };
+    filter = applySearchToFilter(filter, search, ['referenceNumber', 'supplier', 'taxNumber']);
+
+    const baseQuery = Invoice.find(filter)
       .select('referenceNumber supplier taxNumber vatAmount taxVerified total status')
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .lean();
-    res.json(invoices);
+
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -473,13 +519,27 @@ export async function taxCompliance(req, res, next) {
 
 export async function settledArchive(req, res, next) {
   try {
-    const custodies = await Custody.find({ status: CUSTODY_STATUS.SETTLED })
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['settledAt', 'updatedAt', 'createdAt', 'custodyNumber'],
+      defaultSort: '-settledAt',
+    });
+    let filter = {
+      status: { $in: [CUSTODY_STATUS.FINANCE_PENDING, CUSTODY_STATUS.SETTLED] },
+      'accrualEntry.0': { $exists: true },
+    };
+    filter = applySearchToFilter(filter, search, ['custodyNumber', 'settlementNumber']);
+
+    const baseQuery = Custody.find(filter)
       .populate('holder', 'name nameEn')
       .populate('project', 'name nameEn')
-      .populate('invoices')
-      .sort({ settledAt: -1 })
+      .select(
+        'custodyNumber settlementNumber status holder project amount spent approvedSpent settledAt updatedAt disbursedAt accrualEntry disbursementEntry',
+      )
+      .sort(sort)
       .lean({ virtuals: true });
-    res.json(custodies);
+
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }

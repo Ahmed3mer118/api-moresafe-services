@@ -11,6 +11,7 @@ import { logActivity, createNotification } from '../services/notificationService
 import { hashPassword } from '../utils/password.js';
 
 import { escapeRegex } from '../utils/escapeRegex.js';
+import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 import { toSafeUserJSON } from '../utils/safeJson.js';
 
@@ -61,13 +62,9 @@ function normalizeUserProject(p) {
   if (!id) return null;
 
   return {
-
     id,
-
     _id: id,
-
     name: p.name || '',
-
     nameEn: p.nameEn,
 
     status: p.status || 'active',
@@ -126,25 +123,14 @@ export async function listUsers(req, res, next) {
 
   try {
 
-    const { role, search, projectId } = req.query;
+    const { role, projectId } = req.query;
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'name', 'email'],
+    });
 
-    const filter = {};
-
+    let filter = {};
     if (role) filter.role = role;
-
-    if (search) {
-
-      const safe = escapeRegex(search.trim());
-
-      filter.$or = [
-
-        { name: new RegExp(safe, 'i') },
-
-        { email: new RegExp(safe, 'i') },
-
-      ];
-
-    }
+    filter = applySearchToFilter(filter, search, ['name', 'email']);
 
 
 
@@ -156,7 +142,7 @@ export async function listUsers(req, res, next) {
 
       if (projectId) {
         const project = assignedProjects.find((p) => String(p._id) === String(projectId));
-        if (!project) return res.status(404).json({ message: 'Project not found' });
+        if (!project) return res.json(emptyPaginated(page, limit));
 
         const holderIds = await Custody.distinct('holder', { project: projectId });
         const ids = [
@@ -171,17 +157,15 @@ export async function listUsers(req, res, next) {
 
 
 
-    const users = await User.find(filter)
-
+    const baseQuery = User.find(filter)
       .select('-password')
-
       .populate('projects', 'name nameEn status')
-
-      .sort({ createdAt: -1 })
-
-      .lean();
+      .sort(sort);
 
 
+
+    const paginated = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    const users = paginated.items;
 
     const userIds = users.map((u) => u._id);
 
@@ -205,11 +189,10 @@ export async function listUsers(req, res, next) {
 
 
 
-    res.json(
-
-      users.map((u) => toSafeUserJSON(u, extraByUser.get(String(u._id)) || [])),
-
-    );
+    res.json({
+      ...paginated,
+      items: users.map((u) => toSafeUserJSON(u, extraByUser.get(String(u._id)) || [])),
+    });
 
   } catch (err) {
 

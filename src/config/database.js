@@ -19,10 +19,12 @@ export async function connectDB() {
   }
 
   if (!cache.promise) {
+    console.log('Connecting to MongoDB...');
     cache.promise = mongoose
       .connect(uri, {
-        serverSelectionTimeoutMS: 15000,
+        serverSelectionTimeoutMS: 30000,
         socketTimeoutMS: 45000,
+        connectTimeoutMS: 30000,
         maxPoolSize: 10,
       })
       .then((connection) => {
@@ -31,6 +33,11 @@ export async function connectDB() {
       })
       .catch((err) => {
         cache.promise = null;
+        console.error(
+          'MongoDB connection failed:',
+          err.message,
+          '\nCheck: Atlas IP whitelist (Network Access), cluster not paused, and internet/firewall allows outbound port 27017.',
+        );
         throw err;
       });
   }

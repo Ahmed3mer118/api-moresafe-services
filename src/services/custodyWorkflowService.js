@@ -277,12 +277,12 @@ export class CustodyWorkflowService {
     return custody;
   }
 
-  async settleCustody(custodyId, userId, approved = true, reason = '') {
+  async settleCustody(custodyId, userId, approved = true, reason = '', invoiceIds = null) {
     const custody = await Custody.findById(custodyId)
       .populate('project')
       .populate('holder', 'name nameEn');
     if (!custody) throw Object.assign(new Error('Custody not found'), { status: 404 });
-    if (custody.status !== CUSTODY_STATUS.PM_APPROVED) {
+    if (custody.status !== CUSTODY_STATUS.PM_APPROVED && custody.status !== CUSTODY_STATUS.FINANCE_PENDING) {
       const hasPendingFinance = await Invoice.exists({
         custody: custodyId,
         status: INVOICE_STATUS.PENDING_FINANCE,
@@ -297,24 +297,27 @@ export class CustodyWorkflowService {
       status: { $in: [INVOICE_STATUS.PENDING_FINANCE, INVOICE_STATUS.FINANCE_APPROVED] },
     });
 
+    const idFilter = invoiceIds?.length ? new Set(invoiceIds.map(String)) : null;
+
     if (approved) {
-      const toSettle = invoices.filter(
-        (i) => i.status === INVOICE_STATUS.PENDING_FINANCE || i.status === INVOICE_STATUS.FINANCE_APPROVED
-      );
-      if (!toSettle.length) {
+      let toAccrue = invoices.filter((i) => i.status === INVOICE_STATUS.PENDING_FINANCE);
+      if (idFilter) {
+        toAccrue = toAccrue.filter((i) => idFilter.has(String(i._id)));
+      }
+      if (!toAccrue.length) {
         throw Object.assign(new Error('No approved invoices to settle'), { status: 400 });
       }
-      const { lines: batchLines, total } = buildAccrualEntry(toSettle, custody.holder.name);
+
+      const { lines: batchLines, total } = buildAccrualEntry(toAccrue, custody.holder.name);
       const settlementCount = await Custody.countDocuments({ status: CUSTODY_STATUS.SETTLED });
 
-      custody.status = CUSTODY_STATUS.FINANCE_PENDING;
       if (!custody.settlementNumber) {
         custody.settlementNumber = `STL-${440 + settlementCount}`;
       }
-      custody.accrualEntry = appendAccrualEntry(custody.accrualEntry, toSettle, custody.holder.name);
+      custody.accrualEntry = appendAccrualEntry(custody.accrualEntry, toAccrue, custody.holder.name);
 
       await Invoice.updateMany(
-        { _id: { $in: toSettle.map((i) => i._id) }, status: INVOICE_STATUS.PENDING_FINANCE },
+        { _id: { $in: toAccrue.map((i) => i._id) }, status: INVOICE_STATUS.PENDING_FINANCE },
         { status: INVOICE_STATUS.FINANCE_APPROVED }
       );
 
@@ -322,38 +325,73 @@ export class CustodyWorkflowService {
         custodyId: custody._id,
         type: 'adjustment',
         amount: total,
-        description: `قيد استحقاق — ${custody.custodyNumber}${toSettle.length === 1 ? ` · ${toSettle[0].referenceNumber}` : ` · ${toSettle.length} فواتير`}`,
-        descriptionEn: `Accrual entry — ${custody.custodyNumber}${toSettle.length === 1 ? ` · ${toSettle[0].referenceNumber}` : ` · ${toSettle.length} invoice(s)`}`,
+        description: `قيد استحقاق — ${custody.custodyNumber}${toAccrue.length === 1 ? ` · ${toAccrue[0].referenceNumber}` : ` · ${toAccrue.length} فواتير`}`,
+        descriptionEn: `Accrual entry — ${custody.custodyNumber}${toAccrue.length === 1 ? ` · ${toAccrue[0].referenceNumber}` : ` · ${toAccrue.length} invoice(s)`}`,
         referenceType: 'Custody',
         referenceId: custody._id,
         createdBy: userId,
         journalLines: batchLines,
       });
 
-      const admins = await User.find({ role: ROLES.ADMIN, isActive: true }).select('_id').lean();
-      await Promise.all(
-        admins.map((a) =>
-          createNotification({
-            userId: a._id,
-            title: 'عهدة بانتظار الصرف',
-            titleEn: 'Custody pending disbursement',
-            message: `${custody.custodyNumber} — ${total} ريال`,
-            messageEn: `${custody.custodyNumber} — ${total} SAR`,
-            type: 'info',
-            link: '/dashboard/admin/vouchers',
-          })
-        )
-      );
+      const stillPendingFinance = await Invoice.exists({
+        custody: custodyId,
+        status: INVOICE_STATUS.PENDING_FINANCE,
+      });
+      if (!stillPendingFinance) {
+        custody.status = CUSTODY_STATUS.FINANCE_PENDING;
+        custody.settledAt = custody.settledAt || new Date();
+        custody.settledBy = custody.settledBy || userId;
+
+        const admins = await User.find({ role: ROLES.ADMIN, isActive: true }).select('_id').lean();
+        const approvedTotal = await Invoice.aggregate([
+          { $match: { custody: custody._id, status: INVOICE_STATUS.FINANCE_APPROVED } },
+          { $group: { _id: null, total: { $sum: '$total' } } },
+        ]);
+        const notifyAmount = approvedTotal[0]?.total || total;
+        await Promise.all(
+          admins.map((a) =>
+            createNotification({
+              userId: a._id,
+              title: 'عهدة بانتظار الصرف',
+              titleEn: 'Custody pending disbursement',
+              message: `${custody.custodyNumber} — ${notifyAmount} ريال`,
+              messageEn: `${custody.custodyNumber} — ${notifyAmount} SAR`,
+              type: 'info',
+              link: '/dashboard/admin/vouchers',
+            })
+          )
+        );
+      }
     } else {
-      custody.status = CUSTODY_STATUS.FINANCE_REJECTED;
-      custody.financeRejectionReason = reason;
+      let toReject = invoices.filter((i) => i.status === INVOICE_STATUS.PENDING_FINANCE);
+      if (idFilter) {
+        toReject = toReject.filter((i) => idFilter.has(String(i._id)));
+      }
+      if (!toReject.length) {
+        throw Object.assign(new Error('No invoices selected for rejection'), { status: 400 });
+      }
+
       await Invoice.updateMany(
-        { custody: custodyId, status: INVOICE_STATUS.PENDING_FINANCE },
+        { _id: { $in: toReject.map((i) => i._id) }, status: INVOICE_STATUS.PENDING_FINANCE },
         {
           status: INVOICE_STATUS.FINANCE_REJECTED,
           rejectionReason: reason,
         }
       );
+
+      const stillPendingFinance = await Invoice.exists({
+        custody: custodyId,
+        status: INVOICE_STATUS.PENDING_FINANCE,
+      });
+      const stillFinanceApproved = await Invoice.exists({
+        custody: custodyId,
+        status: INVOICE_STATUS.FINANCE_APPROVED,
+      });
+
+      if (!stillPendingFinance && !stillFinanceApproved) {
+        custody.status = CUSTODY_STATUS.FINANCE_REJECTED;
+        custody.financeRejectionReason = reason;
+      }
 
       await createNotification({
         userId: custody.holder._id,
@@ -443,7 +481,9 @@ export class CustodyWorkflowService {
     custody.settledAt = new Date();
     custody.settledBy = userId;
     const batchDisbursementLines = buildDisbursementEntry(total, custody.holder.name);
-    const { lines: batchAccrualLines } = buildAccrualEntry(invoices, custody.holder.name);
+    const batchAccrualLines = custody.accrualEntry?.length
+      ? custody.accrualEntry
+      : buildAccrualEntry(invoices, custody.holder.name).lines;
     custody.disbursementEntry = appendDisbursementEntry(custody.disbursementEntry, total, custody.holder.name);
     custody.disbursementProof = proofUrl;
     custody.disbursedAt = new Date();

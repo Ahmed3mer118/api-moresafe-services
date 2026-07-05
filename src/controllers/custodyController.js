@@ -8,6 +8,7 @@ import { recordCustodyTransaction } from '../services/custodyTransactionService.
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
 import { createNotification } from '../services/notificationService.js';
 import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, resolveFinanceQueueCustodyIds, resolveDisbursementQueueCustodyIds, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairCustodiesWithPendingInvoices, repairSettledCustodyStatus } from '../utils/paProjectAccess.js';
+import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 async function resolveProofAttachment(req) {
   if (req.file) {
@@ -29,14 +30,41 @@ export async function listCustodies(req, res, next) {
     await repairCustodiesAwaitingDisbursement();
     await repairSettledCustodyStatus();
 
-    const { status, projectId, holderId } = req.query;
-    const filter = {};
+    const { status, projectId, holderId, group } = req.query;
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'updatedAt', 'custodyNumber', 'amount', 'spent'],
+      defaultSort: '-updatedAt',
+    });
+    let filter = {};
 
     if (status) filter.status = status;
     if (projectId) filter.project = projectId;
     if (holderId) filter.holder = holderId;
+    filter = applySearchToFilter(filter, search, ['custodyNumber', 'purpose']);
 
     const { role, _id } = req.user;
+
+    if (!status && group === 'active' && role === ROLES.ADMIN) {
+      filter.status = {
+        $nin: [CUSTODY_STATUS.SETTLED, CUSTODY_STATUS.PM_REJECTED, CUSTODY_STATUS.FINANCE_REJECTED],
+      };
+    } else if (!status && group === 'done' && role === ROLES.ADMIN) {
+      filter.status = {
+        $in: [CUSTODY_STATUS.SETTLED, CUSTODY_STATUS.PM_REJECTED, CUSTODY_STATUS.FINANCE_REJECTED],
+      };
+    } else if (!status && group === 'active' && role === ROLES.PROJECT_ACCOUNTANT) {
+      filter.status = {
+        $in: [
+          CUSTODY_STATUS.OPEN,
+          CUSTODY_STATUS.CLOSED,
+          CUSTODY_STATUS.PM_APPROVED,
+          CUSTODY_STATUS.FINANCE_PENDING,
+          CUSTODY_STATUS.PM_REJECTED,
+          CUSTODY_STATUS.FINANCE_REJECTED,
+          CUSTODY_STATUS.SETTLED,
+        ],
+      };
+    }
     if (role === ROLES.PROJECT_MANAGER) {
       filter.holder = _id;
     } else if (role === ROLES.CHIEF_ACCOUNTANT && !status) {
@@ -70,32 +98,42 @@ export async function listCustodies(req, res, next) {
         const archivedStatuses = status
           ? PA_ARCHIVED_CUSTODY_STATUSES.filter((s) => s === status)
           : PA_ARCHIVED_CUSTODY_STATUSES;
-        if (!archivedStatuses.length) return res.json([]);
+        if (!archivedStatuses.length) return res.json(emptyPaginated(page, limit));
         filter.status = { $in: archivedStatuses };
       } else if (req.query.queueOnly === 'true') {
         const queueIds = await resolvePaQueueCustodyIds(
           projectId ? [projectId] : assignedIds,
         );
-        if (!queueIds.length) return res.json([]);
+        if (!queueIds.length) return res.json(emptyPaginated(page, limit));
         filter._id = { $in: queueIds };
       } else if (status) {
         filter.status = status;
       }
     }
 
-    const custodies = await Custody.find(filter)
+    const view = req.query.view === 'card' ? 'card' : 'table';
+    let baseQuery = Custody.find(filter)
       .populate('project', 'name nameEn budget spent manager')
       .populate('holder', 'name nameEn email')
       .populate('pmApprovedBy', 'name nameEn email')
-      .populate({
+      .sort(sort);
+
+    if (view === 'card') {
+      baseQuery = baseQuery.populate({
         path: 'invoices',
         select: 'referenceNumber invoiceNumber supplier category total subtotal vatAmount status invoiceDate attachments attachmentUrl lineItems',
         populate: { path: 'uploadedBy', select: 'name nameEn email' },
-      })
-      .sort({ updatedAt: -1 })
-      .lean({ virtuals: true });
+      });
+    } else {
+      // table view: still return journal lines when present (finance/admin lists)
+      baseQuery = baseQuery.select(
+        'custodyNumber status holder project amount spent approvedSpent purpose type updatedAt settledAt accrualEntry disbursementEntry invoices',
+      );
+    }
 
-    res.json(custodies);
+    baseQuery = baseQuery.lean({ virtuals: true });
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -235,9 +273,24 @@ export async function approveCustodyPM(req, res, next) {
 
 export async function settleCustody(req, res, next) {
   try {
-    const { approved, reason } = req.body;
-    const custody = await custodyWorkflow.settleCustody(req.params.id, req.user._id, approved !== false, reason);
-    res.json(custody);
+    const { approved, reason, invoiceIds } = req.body;
+    const custody = await custodyWorkflow.settleCustody(
+      req.params.id,
+      req.user._id,
+      approved !== false,
+      reason,
+      invoiceIds,
+    );
+    const populated = await Custody.findById(custody._id)
+      .populate('project', 'name nameEn')
+      .populate('holder', 'name nameEn email')
+      .populate('pmApprovedBy', 'name nameEn')
+      .populate({
+        path: 'invoices',
+        select: 'referenceNumber supplier total status invoiceDate category attachments attachmentUrl',
+      })
+      .lean({ virtuals: true });
+    res.json(populated);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }
@@ -298,12 +351,16 @@ export async function listCustodyTransactions(req, res, next) {
 
 export async function listMyTransactions(req, res, next) {
   try {
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'type'],
+      defaultSort: '-createdAt',
+    });
     const CustodyTransaction = (await import('../models/CustodyTransaction.js')).default;
 
     const filter = { holder: req.user._id };
     const custodies = await Custody.find(filter).select('_id custodyNumber accrualEntry disbursementEntry').lean();
     const ids = custodies.map((c) => c._id);
-    if (!ids.length) return res.json([]);
+    if (!ids.length) return res.json(emptyPaginated(page, limit));
 
     const custodyMeta = new Map(
       custodies.map((c) => [
@@ -316,16 +373,21 @@ export async function listMyTransactions(req, res, next) {
       ]),
     );
 
-    const rows = await CustodyTransaction.find({
+    let txFilter = {
       custody: { $in: ids },
       type: { $in: ['adjustment', 'disbursement'] },
-    })
+    };
+    txFilter = applySearchToFilter(txFilter, search, ['description', 'type']);
+
+    const baseQuery = CustodyTransaction.find(txFilter)
       .populate('createdBy', 'name nameEn')
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .lean();
 
-    res.json(
-      rows.map((row) => {
+    const paginated = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json({
+      ...paginated,
+      items: paginated.items.map((row) => {
         const meta = custodyMeta.get(String(row.custody)) || {};
         return {
           ...row,
@@ -340,7 +402,7 @@ export async function listMyTransactions(req, res, next) {
                   : undefined,
         };
       }),
-    );
+    });
   } catch (err) {
     next(err);
   }
@@ -351,14 +413,9 @@ export async function listDisbursementQueue(req, res, next) {
     await repairCustodiesWithPendingInvoices();
     await repairCustodiesAwaitingDisbursement();
 
-    const queueIds = await resolveDisbursementQueueCustodyIds();
-
     const filter = {
-      $or: [
-        { status: CUSTODY_STATUS.FINANCE_PENDING },
-        { status: CUSTODY_STATUS.OPEN, $expr: { $gt: ['$spent', '$amount'] } },
-        ...(queueIds.length ? [{ _id: { $in: queueIds } }] : []),
-      ],
+      status: CUSTODY_STATUS.FINANCE_PENDING,
+      'accrualEntry.0': { $exists: true },
     };
 
     const custodies = await Custody.find(filter)
@@ -366,8 +423,9 @@ export async function listDisbursementQueue(req, res, next) {
       .populate('holder', 'name nameEn email')
       .populate({
         path: 'invoices',
-        select: 'referenceNumber supplier total status invoiceDate',
+        select: 'referenceNumber supplier total status invoiceDate category',
       })
+      .select('+accrualEntry +disbursementEntry')
       .sort({ updatedAt: -1 })
       .lean({ virtuals: true });
 
@@ -379,10 +437,15 @@ export async function listDisbursementQueue(req, res, next) {
 
 export async function listAdminTransactions(req, res, next) {
   try {
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'type'],
+      defaultSort: '-createdAt',
+    });
     const CustodyTransaction = (await import('../models/CustodyTransaction.js')).default;
-    const rows = await CustodyTransaction.find({
-      type: { $in: ['adjustment', 'disbursement'] },
-    })
+    let filter = { type: { $in: ['adjustment', 'disbursement'] } };
+    filter = applySearchToFilter(filter, search, ['description', 'type']);
+
+    const baseQuery = CustodyTransaction.find(filter)
       .populate('createdBy', 'name nameEn')
       .populate({
         path: 'custody',
@@ -392,12 +455,13 @@ export async function listAdminTransactions(req, res, next) {
           { path: 'holder', select: 'name nameEn' },
         ],
       })
-      .sort({ createdAt: -1 })
-      .limit(500)
+      .sort(sort)
       .lean();
 
-    res.json(
-      rows.map((row) => ({
+    const paginated = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json({
+      ...paginated,
+      items: paginated.items.map((row) => ({
         ...row,
         custodyNumber: row.custody?.custodyNumber || '',
         project: row.custody?.project,
@@ -411,7 +475,7 @@ export async function listAdminTransactions(req, res, next) {
                 ? row.custody?.disbursementEntry
                 : undefined,
       })),
-    );
+    });
   } catch (err) {
     next(err);
   }

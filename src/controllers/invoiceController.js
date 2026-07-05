@@ -4,6 +4,7 @@ import Project from '../models/Project.js';
 import User from '../models/User.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PM_UPLOAD_CUSTODY_STATUSES } from '../constants/roles.js';
 import { resolvePaProjectIds, repairCustodiesWithPendingInvoices, repairCustodiesAwaitingFinance } from '../utils/paProjectAccess.js';
+import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { createNotification, logActivity } from '../services/notificationService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
@@ -120,12 +121,16 @@ const ARCHIVED_INVOICE_STATUSES = [
 export async function listInvoices(req, res, next) {
   try {
     const { status, projectId, custodyId, archived, managerId } = req.query;
-    const filter = {};
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'total', 'referenceNumber', 'supplier', 'status'],
+    });
+    let filter = {};
     if (status) filter.status = status;
     if (projectId) filter.project = projectId;
     if (custodyId) filter.custody = custodyId;
     if (managerId) filter.uploadedBy = managerId;
     if (req.query.supplier) filter.supplier = String(req.query.supplier);
+    filter = applySearchToFilter(filter, search, ['referenceNumber', 'invoiceNumber', 'supplier', 'category']);
 
     if (req.query.archived === 'true') {
       filter.status = { $in: ARCHIVED_INVOICE_STATUSES };
@@ -135,9 +140,9 @@ export async function listInvoices(req, res, next) {
       filter.uploadedBy = req.user._id;
     } else if (req.user.role === ROLES.PROJECT_ACCOUNTANT) {
       const assignedIds = await resolvePaProjectIds(req.user._id, req.user.projects);
-      if (!assignedIds.length) return res.json([]);
+      if (!assignedIds.length) return res.json(emptyPaginated(page, limit));
       if (projectId) {
-        if (!assignedIds.some((id) => String(id) === String(projectId))) return res.json([]);
+        if (!assignedIds.some((id) => String(id) === String(projectId))) return res.json(emptyPaginated(page, limit));
         filter.project = projectId;
       } else {
         filter.project = { $in: assignedIds };
@@ -148,7 +153,7 @@ export async function listInvoices(req, res, next) {
       }
     }
 
-    const invoices = await Invoice.find(filter)
+    const baseQuery = Invoice.find(filter)
       .populate({
         path: 'project',
         select: 'name nameEn manager',
@@ -157,10 +162,11 @@ export async function listInvoices(req, res, next) {
       .populate('uploadedBy', 'name nameEn')
       .populate('custody', 'custodyNumber status')
       .select('referenceNumber invoiceNumber project uploadedBy custody supplier category lineItems subtotal vatAmount total taxNumber status invoiceDate attachments attachmentUrl rejectionReason createdAt')
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .lean();
 
-    res.json(invoices);
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -406,9 +412,13 @@ export async function reviewInvoice(req, res, next) {
 
 export async function pendingFinanceInvoices(req, res, next) {
   try {
-    const invoices = await Invoice.find({
-      status: INVOICE_STATUS.PENDING_FINANCE,
-    })
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'total', 'referenceNumber'],
+    });
+    let filter = { status: INVOICE_STATUS.PENDING_FINANCE };
+    filter = applySearchToFilter(filter, search, ['referenceNumber', 'supplier', 'invoiceNumber']);
+
+    const baseQuery = Invoice.find(filter)
       .populate({
         path: 'project',
         select: 'name nameEn manager',
@@ -416,8 +426,11 @@ export async function pendingFinanceInvoices(req, res, next) {
       })
       .populate('uploadedBy', 'name nameEn')
       .select('referenceNumber invoiceNumber project uploadedBy supplier category lineItems subtotal vatAmount total taxNumber status invoiceDate attachments attachmentUrl rejectionReason createdAt')
-      .sort({ createdAt: -1 });
-    res.json(invoices);
+      .sort(sort)
+      .lean();
+
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -425,12 +438,22 @@ export async function pendingFinanceInvoices(req, res, next) {
 
 export async function rejectedInvoices(req, res, next) {
   try {
-    const filter = {
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'total', 'referenceNumber'],
+    });
+    let filter = {
       uploadedBy: req.user._id,
       status: { $in: [INVOICE_STATUS.PM_REJECTED, INVOICE_STATUS.FINANCE_REJECTED] },
     };
-    const invoices = await Invoice.find(filter).populate('project', 'name nameEn').lean();
-    res.json(invoices);
+    filter = applySearchToFilter(filter, search, ['referenceNumber', 'supplier']);
+
+    const baseQuery = Invoice.find(filter)
+      .populate('project', 'name nameEn')
+      .sort(sort)
+      .lean();
+
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }

@@ -4,10 +4,14 @@ import Custody from '../models/Custody.js';
 import { logActivity } from '../services/notificationService.js';
 import { ROLES } from '../constants/roles.js';
 import { resolvePaProjectIds } from '../utils/paProjectAccess.js';
+import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 export async function listProjects(req, res, next) {
   try {
-    const filter = {};
+    const { page, limit, skip, search, sort } = parseListQuery(req.query, {
+      allowedSortFields: ['createdAt', 'name', 'budget', 'spent'],
+    });
+    let filter = {};
     const { role, _id } = req.user;
 
     if (role === ROLES.PROJECT_MANAGER) {
@@ -19,17 +23,19 @@ export async function listProjects(req, res, next) {
       filter.$or = or;
     } else if (role === ROLES.PROJECT_ACCOUNTANT) {
       const assignedIds = await resolvePaProjectIds(_id, req.user.projects);
-      if (!assignedIds.length) return res.json([]);
+      if (!assignedIds.length) return res.json(emptyPaginated(page, limit));
       filter._id = { $in: assignedIds };
     }
 
-    const projects = await Project.find(filter)
+    filter = applySearchToFilter(filter, search, ['name', 'nameEn', 'code']);
+
+    const baseQuery = Project.find(filter)
       .populate('manager', 'name nameEn email')
       .populate('accountants', 'name nameEn email')
-      .sort({ createdAt: -1 })
-      .lean({ virtuals: true });
+      .sort(sort);
 
-    res.json(projects);
+    const result = await paginateMongooseQuery(baseQuery, { page, limit, skip });
+    res.json(result);
   } catch (err) {
     next(err);
   }
