@@ -7,7 +7,7 @@ import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { recordCustodyTransaction } from '../services/custodyTransactionService.js';
 import { storeBase64Payload, storeMulterFile } from '../services/attachmentStorage.js';
 import { createNotification } from '../services/notificationService.js';
-import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, resolveFinanceQueueCustodyIds, resolveDisbursementQueueCustodyIds, repairCustodiesAwaitingFinance, repairCustodiesAwaitingDisbursement, repairCustodiesWithPendingInvoices, repairSettledCustodyStatus } from '../utils/paProjectAccess.js';
+import { resolvePaProjectIds, countPaQueueCustodies, resolvePaQueueCustodyIds, resolveFinanceQueueCustodyIds } from '../utils/paProjectAccess.js';
 import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 async function resolveProofAttachment(req) {
@@ -23,14 +23,28 @@ async function resolveProofAttachment(req) {
   return req.body?.proofUrl || null;
 }
 
+const CARD_INVOICE_FIELDS =
+  'referenceNumber invoiceNumber supplier category total subtotal vatAmount status invoiceDate';
+
+async function applyInvoiceStatusCustodyFilter(filter, invoiceStatus) {
+  if (!invoiceStatus) return true;
+  const custodyIds = await Invoice.distinct('custody', {
+    status: invoiceStatus,
+    custody: { $exists: true, $ne: null },
+  });
+  if (!custodyIds.length) return false;
+  if (filter._id?.$in) {
+    const allowed = new Set(filter._id.$in.map(String));
+    filter._id = { $in: custodyIds.filter((id) => allowed.has(String(id))) };
+    return filter._id.$in.length > 0;
+  }
+  filter._id = { $in: custodyIds };
+  return true;
+}
+
 export async function listCustodies(req, res, next) {
   try {
-    await repairCustodiesWithPendingInvoices();
-    await repairCustodiesAwaitingFinance();
-    await repairCustodiesAwaitingDisbursement();
-    await repairSettledCustodyStatus();
-
-    const { status, projectId, holderId, group } = req.query;
+    const { status, projectId, holderId, group, invoiceStatus } = req.query;
     const { page, limit, skip, search, sort } = parseListQuery(req.query, {
       allowedSortFields: ['createdAt', 'updatedAt', 'custodyNumber', 'amount', 'spent'],
       defaultSort: '-updatedAt',
@@ -111,6 +125,10 @@ export async function listCustodies(req, res, next) {
       }
     }
 
+    if (!(await applyInvoiceStatusCustodyFilter(filter, invoiceStatus))) {
+      return res.json(emptyPaginated(page, limit));
+    }
+
     const view = req.query.view === 'card' ? 'card' : 'table';
     let baseQuery = Custody.find(filter)
       .populate('project', 'name nameEn budget spent manager')
@@ -119,11 +137,15 @@ export async function listCustodies(req, res, next) {
       .sort(sort);
 
     if (view === 'card') {
-      baseQuery = baseQuery.populate({
+      const invoicePopulate = {
         path: 'invoices',
-        select: 'referenceNumber invoiceNumber supplier category total subtotal vatAmount status invoiceDate attachments attachmentUrl lineItems',
-        populate: { path: 'uploadedBy', select: 'name nameEn email' },
-      });
+        select: CARD_INVOICE_FIELDS,
+        populate: { path: 'uploadedBy', select: 'name nameEn' },
+      };
+      if (invoiceStatus) {
+        invoicePopulate.match = { status: invoiceStatus };
+      }
+      baseQuery = baseQuery.populate(invoicePopulate);
     } else {
       // table view: still return journal lines when present (finance/admin lists)
       baseQuery = baseQuery.select(
@@ -144,11 +166,6 @@ export async function getCustody(req, res, next) {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(404).json({ message: 'Custody not found' });
     }
-    await repairCustodiesWithPendingInvoices();
-    await repairCustodiesAwaitingFinance();
-    await repairCustodiesAwaitingDisbursement();
-    await repairSettledCustodyStatus();
-
     const custody = await Custody.findById(req.params.id)
       .populate('project')
       .populate('holder', 'name nameEn email')
@@ -410,9 +427,6 @@ export async function listMyTransactions(req, res, next) {
 
 export async function listDisbursementQueue(req, res, next) {
   try {
-    await repairCustodiesWithPendingInvoices();
-    await repairCustodiesAwaitingDisbursement();
-
     const filter = {
       status: CUSTODY_STATUS.FINANCE_PENDING,
       'accrualEntry.0': { $exists: true },

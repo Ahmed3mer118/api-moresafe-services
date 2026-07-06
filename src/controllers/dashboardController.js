@@ -5,8 +5,6 @@ import Invoice from '../models/Invoice.js';
 import Notification from '../models/Notification.js';
 import ActivityLog from '../models/ActivityLog.js';
 import Voucher, { nextVoucherNumber } from '../models/Voucher.js';
-import { resolveVoucherJournalEntries } from '../utils/voucherJournal.js';
-import { accrualDebitTotal } from '../utils/journalEntries.js';
 import Settings from '../models/Settings.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES } from '../constants/roles.js';
 import {
@@ -22,7 +20,7 @@ import {
   projectAccountantReports,
   adminDisbursementReports,
 } from '../services/dashboardAnalytics.js';
-import { resolvePaProjectIds, countPaQueueCustodies } from '../utils/paProjectAccess.js';
+import { resolvePaProjectIds, countPaQueueCustodies, countPmQueueInvoices } from '../utils/paProjectAccess.js';
 import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 
 export async function adminDashboard(req, res, next) {
@@ -139,7 +137,7 @@ export async function projectAccountantDashboard(req, res, next) {
       .populate('project', 'name nameEn')
       .lean({ virtuals: true });
 
-    const [openCount, rejected, draftInvoices, invoiceChart, expenseTrend, recentInvoices] =
+    const [openCount, rejected, draftInvoices, pendingPmApprovals, invoiceChart, expenseTrend, recentInvoices] =
       await Promise.all([
         Custody.countDocuments({ holder: req.user._id, status: CUSTODY_STATUS.OPEN }),
         Invoice.countDocuments({
@@ -150,6 +148,7 @@ export async function projectAccountantDashboard(req, res, next) {
           uploadedBy: req.user._id,
           status: { $in: [INVOICE_STATUS.ACCUMULATED, INVOICE_STATUS.PENDING_PM, INVOICE_STATUS.DRAFT] },
         }),
+        countPmQueueInvoices(req.user._id),
         invoiceStatusChart({ uploadedBy: req.user._id }),
         userInvoiceExpenseTrend(req.user._id, 6),
         Invoice.find({ uploadedBy: req.user._id })
@@ -165,6 +164,7 @@ export async function projectAccountantDashboard(req, res, next) {
       openCount,
       rejected,
       draftInvoices,
+      pendingPmApprovals,
       remaining: openCustody?.remaining ?? 0,
       amount: openCustody?.amount ?? 0,
       invoiceChart,
@@ -240,36 +240,11 @@ export async function listVouchers(req, res, next) {
 
     const total = await Voucher.countDocuments(filter);
 
-    const vouchers = await Promise.all(
-      rows.map(async (v) => {
-        const journals = await resolveVoucherJournalEntries(v);
-        const storedAccrualTotal = accrualDebitTotal(v.accrualEntry);
-        const resolvedAccrualTotal = accrualDebitTotal(journals.accrualEntry);
-        const needsPersist =
-          !v.accrualEntry?.length
-          || !v.disbursementEntry?.length
-          || Math.abs(storedAccrualTotal - resolvedAccrualTotal) > 0.01
-          || Math.abs(storedAccrualTotal - Number(v.amount || 0)) > 0.01;
-
-        if (needsPersist && (journals.accrualEntry?.length || journals.disbursementEntry?.length)) {
-          await Voucher.updateOne(
-            { _id: v._id },
-            {
-              $set: {
-                ...(journals.accrualEntry?.length ? { accrualEntry: journals.accrualEntry } : {}),
-                ...(journals.disbursementEntry?.length ? { disbursementEntry: journals.disbursementEntry } : {}),
-              },
-            },
-          );
-        }
-
-        return {
-          ...v,
-          accrualEntry: journals.accrualEntry,
-          disbursementEntry: journals.disbursementEntry,
-        };
-      }),
-    );
+    const vouchers = rows.map((v) => ({
+      ...v,
+      accrualEntry: v.accrualEntry ?? [],
+      disbursementEntry: v.disbursementEntry ?? [],
+    }));
 
     res.json({
       items: vouchers,

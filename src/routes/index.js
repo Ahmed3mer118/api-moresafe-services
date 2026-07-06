@@ -55,6 +55,7 @@ router.post('/custodies/:id/top-up', authenticate, authorize(ROLES.ADMIN), uploa
 // Invoices
 router.get('/invoices', authenticate, invoiceCtrl.listInvoices);
 router.post('/invoices/batch-pm-review', authenticate, authorize(ROLES.PROJECT_ACCOUNTANT), invoiceCtrl.batchPmReviewInvoices);
+router.post('/invoices/batch-pm-approve', authenticate, authorize(ROLES.PROJECT_MANAGER), invoiceCtrl.batchPmApproveInvoices);
 router.post('/invoices/batch-review', authenticate, authorize(ROLES.CHIEF_ACCOUNTANT), invoiceCtrl.batchReviewInvoices);
 router.get('/invoices/pending-finance', authenticate, authorize(ROLES.CHIEF_ACCOUNTANT), invoiceCtrl.pendingFinanceInvoices);
 router.get('/invoices/rejected', authenticate, authorize(ROLES.PROJECT_MANAGER), invoiceCtrl.rejectedInvoices);
@@ -63,6 +64,7 @@ router.post('/invoices', authenticate, authorize(ROLES.PROJECT_MANAGER), invoice
 router.post('/invoices/upload', authenticate, authorize(ROLES.PROJECT_MANAGER), upload.array('files', 10), invoiceCtrl.createInvoice);
 router.patch('/invoices/:id', authenticate, authorize(ROLES.PROJECT_MANAGER), invoiceCtrl.updateInvoice);
 router.post('/invoices/:id/pm-review', authenticate, authorize(ROLES.PROJECT_ACCOUNTANT), invoiceCtrl.pmReviewInvoice);
+router.post('/invoices/:id/pm-approve', authenticate, authorize(ROLES.PROJECT_MANAGER), invoiceCtrl.pmApproveInvoice);
 router.post('/invoices/:id/review', authenticate, authorize(ROLES.CHIEF_ACCOUNTANT), invoiceCtrl.reviewInvoice);
 
 // OCR

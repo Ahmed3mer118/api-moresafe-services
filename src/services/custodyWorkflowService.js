@@ -115,11 +115,6 @@ export class CustodyWorkflowService {
     const selectedTotal = invoices.reduce((s, i) => s + i.total, 0);
     const selectedIds = invoices.map((i) => i._id);
 
-    await Invoice.updateMany(
-      { _id: { $in: selectedIds } },
-      { status: INVOICE_STATUS.PENDING_PM }
-    );
-
     const remainingAccumulated = await Invoice.countDocuments({
       custody: custodyId,
       status: INVOICE_STATUS.ACCUMULATED,
@@ -154,6 +149,7 @@ export class CustodyWorkflowService {
         custody: custodyId,
         status: {
           $in: [
+            INVOICE_STATUS.ACCUMULATED,
             INVOICE_STATUS.PENDING_PM,
             INVOICE_STATUS.PM_APPROVED,
             INVOICE_STATUS.PENDING_FINANCE,
@@ -163,6 +159,7 @@ export class CustodyWorkflowService {
         },
       }),
       [
+        INVOICE_STATUS.ACCUMULATED,
         INVOICE_STATUS.PENDING_PM,
         INVOICE_STATUS.PM_APPROVED,
         INVOICE_STATUS.PENDING_FINANCE,
@@ -222,36 +219,34 @@ export class CustodyWorkflowService {
     }
 
     if (approved) {
-      custody.status = CUSTODY_STATUS.PM_APPROVED;
-      custody.pmApprovedAt = new Date();
-      custody.pmApprovedBy = userId;
       await Invoice.updateMany(
-        { custody: custodyId, status: INVOICE_STATUS.PENDING_PM },
-        { status: INVOICE_STATUS.PENDING_FINANCE }
+        { custody: custodyId, status: INVOICE_STATUS.ACCUMULATED },
+        { $set: { status: INVOICE_STATUS.PENDING_PM, approvedBy: userId, approvedAt: new Date() } }
       );
 
-      const accountants = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true }).select('_id').lean();
-      await Promise.all(
-        accountants.map((a) =>
-          createNotification({
-            userId: a._id,
-            title: 'عهدة معتمدة — بانتظار التسوية',
-            titleEn: 'Approved custody — pending settlement',
-            message: `${custody.custodyNumber} جاهزة للمالية`,
-            messageEn: `${custody.custodyNumber} ready for finance`,
-            type: 'info',
-            link: '/dashboard/finance/entries',
-          })
-        )
-      );
+      const holder = custody.holder;
+      if (holder?._id) {
+        await createNotification({
+          userId: holder._id,
+          title: 'فواتير بانتظار اعتمادك',
+          titleEn: 'Invoices awaiting your approval',
+          message: `عهدة ${custody.custodyNumber} — بانتظار مراجعة مدير المشاريع`,
+          messageEn: `Custody ${custody.custodyNumber} — awaiting project manager review`,
+          type: 'info',
+          link: '/dashboard/project-manager/approvals',
+        });
+      }
     } else {
       custody.status = CUSTODY_STATUS.PM_REJECTED;
       custody.pmRejectionReason = reason;
-      await Invoice.updateMany({ custody: custodyId }, {
-        status: INVOICE_STATUS.PM_REJECTED,
-        rejectionReason: reason,
-        rejectedBy: userId,
-      });
+      await Invoice.updateMany(
+        { custody: custodyId, status: INVOICE_STATUS.ACCUMULATED },
+        {
+          status: INVOICE_STATUS.PM_REJECTED,
+          rejectionReason: reason,
+          rejectedBy: userId,
+        },
+      );
 
       await createNotification({
         userId: custody.holder._id,
@@ -621,7 +616,8 @@ export class CustodyWorkflowService {
     if (!syncableStatuses.includes(custody.status)) return;
 
     const invoices = await Invoice.find({ custody: custodyId });
-    const stillPendingPa = invoices.some((i) => i.status === INVOICE_STATUS.PENDING_PM);
+    const stillPendingPa = invoices.some((i) => i.status === INVOICE_STATUS.ACCUMULATED);
+    const stillPendingPm = invoices.some((i) => i.status === INVOICE_STATUS.PENDING_PM);
 
     const pmApproved = invoices.filter((i) => i.status === INVOICE_STATUS.PM_APPROVED);
     if (pmApproved.length) {
@@ -640,7 +636,7 @@ export class CustodyWorkflowService {
       ].includes(i.status)
     );
 
-    if (pendingFinance.length) {
+    if (pendingFinance.length && !stillPendingPm && !stillPendingPa) {
       const batchJustApproved = pmApproved.length ? pmApproved : pendingFinance;
       custody.status = CUSTODY_STATUS.PM_APPROVED;
       custody.pmApprovedAt = new Date();
@@ -649,22 +645,20 @@ export class CustodyWorkflowService {
       custody.approvedSpent = sumInvoices(refreshed, FINANCE_ELIGIBLE_STATUSES);
 
       const approvedTotal = batchJustApproved.reduce((s, i) => s + (i.total || 0), 0);
-      const approver = await User.findById(userId).select('name nameEn').lean();
-      const approverName = approver?.name || approver?.nameEn || 'محاسب العهد';
 
-      if (custody.holder && pmApproved.length) {
+      if (custody.holder && !stillPendingPm && !stillPendingPa) {
         await createNotification({
           userId: custody.holder._id,
-          title: 'اعتماد العهدة من محاسب العهد',
-          titleEn: 'Custody approved by custody accountant',
-          message: `تم اعتماد عهدة ${custody.custodyNumber} بواسطة ${approverName} — ${pmApproved.length} فاتورة (${approvedTotal} ريال)`,
-          messageEn: `Custody ${custody.custodyNumber} approved by ${approverName} — ${pmApproved.length} invoice(s) (${approvedTotal} SAR)`,
+          title: 'اعتماد العهدة من مدير المشاريع',
+          titleEn: 'Custody approved by project manager',
+          message: `تم اعتماد عهدة ${custody.custodyNumber} — ${pendingFinance.length} فاتورة (${approvedTotal} ريال) بانتظار المالية`,
+          messageEn: `Custody ${custody.custodyNumber} — ${pendingFinance.length} invoice(s) (${approvedTotal} SAR) pending finance`,
           type: 'success',
           link: '/dashboard/project-manager/custody',
         });
       }
 
-      if (pmApproved.length) {
+      if (!stillPendingPm && !stillPendingPa) {
         const accountants = await User.find({ role: ROLES.CHIEF_ACCOUNTANT, isActive: true });
         await Promise.all(
           accountants.map((a) =>
@@ -672,15 +666,15 @@ export class CustodyWorkflowService {
               userId: a._id,
               title: 'فواتير معتمدة — بانتظار المالية',
               titleEn: 'Approved invoices — pending finance',
-              message: `${custody.custodyNumber} — ${pmApproved.length} فاتورة (${approvedTotal} ريال)`,
-              messageEn: `${custody.custodyNumber} — ${pmApproved.length} invoice(s) (${approvedTotal} SAR)`,
+              message: `${custody.custodyNumber} — ${pendingFinance.length} فاتورة (${approvedTotal} ريال)`,
+              messageEn: `${custody.custodyNumber} — ${pendingFinance.length} invoice(s) (${approvedTotal} SAR)`,
               type: 'info',
               link: '/dashboard/finance/entries',
             })
           )
         );
       }
-    } else if (stillPendingPa) {
+    } else if (stillPendingPm || stillPendingPa) {
       const financeApproved = refreshed.filter((i) => i.status === INVOICE_STATUS.FINANCE_APPROVED);
       const settledInvoices = refreshed.filter((i) => i.status === INVOICE_STATUS.SETTLED);
       if (financeApproved.length) {
@@ -713,13 +707,87 @@ export class CustodyWorkflowService {
   async pmReviewInvoice(invoiceId, userId, approved = true, reason = '') {
     const invoice = await Invoice.findById(invoiceId).populate('uploadedBy project');
     if (!invoice) throw Object.assign(new Error('Invoice not found'), { status: 404 });
-    if (invoice.status !== INVOICE_STATUS.PENDING_PM) {
-      throw Object.assign(new Error('Invoice is not pending approval'), { status: 400 });
+    if (invoice.status !== INVOICE_STATUS.ACCUMULATED) {
+      throw Object.assign(new Error('Invoice is not pending PA review'), { status: 400 });
     }
 
     const approver = await User.findById(userId).select('role').lean();
     if (!approver || approver.role !== ROLES.PROJECT_ACCOUNTANT) {
       throw Object.assign(new Error('Not authorized to review invoice'), { status: 403 });
+    }
+
+    if (approved) {
+      invoice.status = INVOICE_STATUS.PENDING_PM;
+      invoice.rejectionReason = undefined;
+      invoice.rejectedBy = undefined;
+      invoice.approvedBy = userId;
+      invoice.approvedAt = new Date();
+
+      const custody = await Custody.findById(invoice.custody).populate('holder');
+      if (custody?.holder?._id) {
+        await createNotification({
+          userId: custody.holder._id,
+          title: 'فاتورة بانتظار اعتمادك',
+          titleEn: 'Invoice awaiting your approval',
+          message: `${invoice.referenceNumber} — بانتظار مراجعة مدير المشاريع`,
+          messageEn: `${invoice.referenceNumber} — awaiting project manager review`,
+          type: 'info',
+          link: '/dashboard/project-manager/approvals',
+        });
+      }
+    } else {
+      if (!reason?.trim()) {
+        throw Object.assign(new Error('Rejection reason is required'), { status: 400 });
+      }
+      invoice.status = INVOICE_STATUS.PM_REJECTED;
+      invoice.rejectionReason = reason;
+      invoice.rejectedBy = userId;
+
+      await createNotification({
+        userId: invoice.uploadedBy._id,
+        title: 'رفض فاتورة من محاسب العهدة',
+        titleEn: 'Invoice rejected by custody accountant',
+        message: `${invoice.referenceNumber}: ${reason}`,
+        messageEn: `${invoice.referenceNumber}: ${reason}`,
+        type: 'reject',
+        link: '/dashboard/project-manager/rejected',
+      });
+    }
+
+    await invoice.save();
+
+    if (invoice.custody) {
+      await recalcCustodyTotals(invoice.custody);
+      await this.syncCustodyAfterInvoiceReviews(invoice.custody, userId);
+    }
+
+    await logActivity({
+      userId,
+      action: approved ? `اعتماد فاتورة ${invoice.referenceNumber} (محاسب العهدة)` : `رفض فاتورة ${invoice.referenceNumber}`,
+      actionEn: approved ? `PA approved invoice ${invoice.referenceNumber}` : `Rejected invoice ${invoice.referenceNumber}`,
+      entityType: 'Invoice',
+      entityId: invoice._id,
+      details: { reason },
+    });
+
+    return invoice;
+  }
+
+  async pmApproveInvoice(invoiceId, userId, approved = true, reason = '') {
+    const invoice = await Invoice.findById(invoiceId).populate('uploadedBy project');
+    if (!invoice) throw Object.assign(new Error('Invoice not found'), { status: 404 });
+    if (invoice.status !== INVOICE_STATUS.PENDING_PM) {
+      throw Object.assign(new Error('Invoice is not pending PM approval'), { status: 400 });
+    }
+
+    const approver = await User.findById(userId).select('role').lean();
+    if (!approver || approver.role !== ROLES.PROJECT_MANAGER) {
+      throw Object.assign(new Error('Not authorized to approve invoice'), { status: 403 });
+    }
+
+    const custody = await Custody.findById(invoice.custody);
+    if (!custody || String(custody.holder) !== String(userId)) {
+      throw Object.assign(new Error('Not your custody invoice'), { status: 403 });
     }
 
     if (approved) {
@@ -756,8 +824,8 @@ export class CustodyWorkflowService {
 
     await logActivity({
       userId,
-      action: approved ? `اعتماد فاتورة ${invoice.referenceNumber}` : `رفض فاتورة ${invoice.referenceNumber}`,
-      actionEn: approved ? `Approved invoice ${invoice.referenceNumber}` : `Rejected invoice ${invoice.referenceNumber}`,
+      action: approved ? `اعتماد فاتورة ${invoice.referenceNumber} (مدير المشاريع)` : `رفض فاتورة ${invoice.referenceNumber}`,
+      actionEn: approved ? `PM approved invoice ${invoice.referenceNumber}` : `PM rejected invoice ${invoice.referenceNumber}`,
       entityType: 'Invoice',
       entityId: invoice._id,
       details: { reason },

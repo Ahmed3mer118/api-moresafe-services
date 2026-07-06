@@ -47,16 +47,27 @@ export function emptyPaginated(page = DEFAULT_PAGE, limit = DEFAULT_LIMIT) {
   return paginatedResponse([], 0, page, limit);
 }
 
-/** Build $or regex search across string fields */
-export function searchFilter(search, fields) {
-  if (!search) return null;
+/** Build $or regex search — prefix on id-like fields (uses indexes better than substring scan) */
+export function searchFilter(search, fields, options = {}) {
+  if (!search || search.length < 2) return null;
   const safe = escapeRegex(search);
-  const regex = new RegExp(safe, 'i');
-  return { $or: fields.map((field) => ({ [field]: regex })) };
+  const prefixFields = new Set(options.prefixFields ?? []);
+  const defaultPrefix = (field) =>
+    prefixFields.has(field)
+    || field.endsWith('Number')
+    || field === 'referenceNumber'
+    || field === 'settlementNumber'
+    || field === 'bankReference';
+
+  return {
+    $or: fields.map((field) => ({
+      [field]: new RegExp(defaultPrefix(field) ? `^${safe}` : safe, 'i'),
+    })),
+  };
 }
 
-export function applySearchToFilter(filter, search, fields) {
-  const clause = searchFilter(search, fields);
+export function applySearchToFilter(filter, search, fields, options) {
+  const clause = searchFilter(search, fields, options);
   if (!clause) return filter;
   if (!Object.keys(filter).length) return clause;
   return { $and: [filter, clause] };

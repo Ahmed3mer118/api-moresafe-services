@@ -51,13 +51,31 @@ const invoiceSchema = new mongoose.Schema(
 invoiceSchema.index({ uploadedBy: 1, status: 1, createdAt: -1 });
 invoiceSchema.index({ project: 1, status: 1 });
 invoiceSchema.index({ custody: 1 });
+invoiceSchema.index({ status: 1, custody: 1 });
+invoiceSchema.index({ status: 1, project: 1, custody: 1 });
 invoiceSchema.index({ status: 1, createdAt: -1 });
 invoiceSchema.index({ supplier: 1, total: -1 });
 invoiceSchema.index({ createdAt: -1 });
 
 export async function nextInvoiceReference() {
-  const count = await mongoose.model('Invoice').countDocuments();
-  return `INV-${1040 + count}`;
+  const [row] = await mongoose.model('Invoice').aggregate([
+    { $match: { referenceNumber: { $regex: /^INV-\d+$/ } } },
+    {
+      $project: {
+        n: {
+          $convert: {
+            input: { $arrayElemAt: [{ $split: ['$referenceNumber', '-'] }, 1] },
+            to: 'int',
+            onError: 0,
+            onNull: 0,
+          },
+        },
+      },
+    },
+    { $group: { _id: null, maxNum: { $max: '$n' } } },
+  ]);
+  const nextNum = Math.max(1040, (row?.maxNum ?? 1039) + 1);
+  return `INV-${nextNum}`;
 }
 
 export default mongoose.model('Invoice', invoiceSchema);

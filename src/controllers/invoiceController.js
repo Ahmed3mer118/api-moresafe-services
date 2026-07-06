@@ -3,7 +3,7 @@ import Custody from '../models/Custody.js';
 import Project from '../models/Project.js';
 import User from '../models/User.js';
 import { CUSTODY_STATUS, INVOICE_STATUS, ROLES, PM_UPLOAD_CUSTODY_STATUSES } from '../constants/roles.js';
-import { resolvePaProjectIds, repairCustodiesWithPendingInvoices, repairCustodiesAwaitingFinance } from '../utils/paProjectAccess.js';
+import { resolvePaProjectIds } from '../utils/paProjectAccess.js';
 import { parseListQuery, paginateMongooseQuery, emptyPaginated, applySearchToFilter } from '../utils/listQuery.js';
 import custodyWorkflow from '../services/custodyWorkflowService.js';
 import { createNotification, logActivity } from '../services/notificationService.js';
@@ -62,12 +62,8 @@ function parseLineItems(raw) {
 
 async function persistUploadFiles(files) {
   if (!files?.length) return [];
-  const attachments = [];
-  for (const file of files) {
-    const stored = await storeMulterFile(file);
-    if (stored) attachments.push(stored);
-  }
-  return attachments;
+  const attachments = await Promise.all(files.map((file) => storeMulterFile(file)));
+  return attachments.filter(Boolean);
 }
 
 async function persistBase64Attachments(raw) {
@@ -82,12 +78,8 @@ async function persistBase64Attachments(raw) {
   }
   if (!Array.isArray(list)) return [];
 
-  const attachments = [];
-  for (const att of list) {
-    const stored = await storeBase64Payload(att);
-    if (stored) attachments.push(stored);
-  }
-  return attachments;
+  const attachments = await Promise.all(list.map((att) => storeBase64Payload(att)));
+  return attachments.filter(Boolean);
 }
 
 function parseInvoiceBody(req) {
@@ -147,10 +139,6 @@ export async function listInvoices(req, res, next) {
       } else {
         filter.project = { $in: assignedIds };
       }
-      if (status === INVOICE_STATUS.PENDING_PM) {
-        await repairCustodiesWithPendingInvoices();
-        await repairCustodiesAwaitingFinance();
-      }
     }
 
     const baseQuery = Invoice.find(filter)
@@ -161,7 +149,7 @@ export async function listInvoices(req, res, next) {
       })
       .populate('uploadedBy', 'name nameEn')
       .populate('custody', 'custodyNumber status')
-      .select('referenceNumber invoiceNumber project uploadedBy custody supplier category lineItems subtotal vatAmount total taxNumber status invoiceDate attachments attachmentUrl rejectionReason createdAt')
+      .select('referenceNumber invoiceNumber project uploadedBy custody supplier category subtotal vatAmount total taxNumber status invoiceDate rejectionReason createdAt')
       .sort(sort)
       .lean();
 
@@ -177,10 +165,12 @@ export async function getInvoice(req, res, next) {
     const invoice = await Invoice.findById(req.params.id)
       .populate({
         path: 'project',
+        select: 'name nameEn manager',
         populate: { path: 'manager', select: 'name nameEn email' },
       })
       .populate('uploadedBy', 'name nameEn email')
-      .populate('custody');
+      .populate('custody', 'custodyNumber status project')
+      .lean();
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
     res.json(invoice);
   } catch (err) {
@@ -210,7 +200,24 @@ export async function createInvoice(req, res, next) {
       return res.status(400).json({ message: 'projectId is required' });
     }
 
-    const project = await Project.findById(projectId);
+    const custodyPromise = custodyId
+      ? (req.user.role === ROLES.PROJECT_MANAGER
+        ? resolvePmUploadCustody(custodyId, req.user._id)
+        : Custody.findOne({ _id: custodyId, status: CUSTODY_STATUS.OPEN }).then((c) =>
+          c ? { custody: c } : { error: 'Open custody not found', status: 400 },
+        ))
+      : Promise.resolve({ custody: null });
+
+    const [project, custodyResult, attachments, referenceNumber] = await Promise.all([
+      Project.findById(projectId).lean(),
+      custodyPromise,
+      persistUploadFiles(req.files).then(async (stored) => {
+        if (stored.length) return stored;
+        return persistBase64Attachments(attachmentsPayload);
+      }),
+      nextInvoiceReference(),
+    ]);
+
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
     }
@@ -224,23 +231,13 @@ export async function createInvoice(req, res, next) {
       }
     }
 
-    let custody = null;
-    if (custodyId) {
-      if (req.user.role === ROLES.PROJECT_MANAGER) {
-        const resolved = await resolvePmUploadCustody(custodyId, req.user._id);
-        if (resolved.error) {
-          return res.status(resolved.status).json({ message: resolved.error });
-        }
-        custody = resolved.custody;
-      } else {
-        custody = await Custody.findOne({ _id: custodyId, status: CUSTODY_STATUS.OPEN });
-        if (!custody) {
-          return res.status(400).json({ message: 'Open custody not found' });
-        }
-      }
-      if (String(custody.project) !== String(projectId)) {
-        return res.status(400).json({ message: 'Project does not match custody' });
-      }
+    if (custodyResult?.error) {
+      return res.status(custodyResult.status).json({ message: custodyResult.error });
+    }
+
+    const custody = custodyResult?.custody ?? null;
+    if (custody && String(custody.project) !== String(projectId)) {
+      return res.status(400).json({ message: 'Project does not match custody' });
     }
 
     const lineTotal = lineItems.reduce((s, i) => s + (Number(i.total) || 0), 0);
@@ -248,13 +245,8 @@ export async function createInvoice(req, res, next) {
     const parsedVat = Number(vatAmount) || 0;
     const computedTotal = Number(total) || parsedSubtotal + parsedVat || lineTotal;
 
-    let attachments = await persistUploadFiles(req.files);
-    if (!attachments.length && attachmentsPayload) {
-      attachments = await persistBase64Attachments(attachmentsPayload);
-    }
-
     const invoice = await Invoice.create({
-      referenceNumber: await nextInvoiceReference(),
+      referenceNumber,
       invoiceNumber: invoiceNumber || `INV-${Date.now()}`,
       project: projectId,
       custody: custody?._id,
@@ -275,39 +267,42 @@ export async function createInvoice(req, res, next) {
     });
 
     if (custody) {
-      custody.invoices.push(invoice._id);
-      custody.spent = (custody.spent || 0) + computedTotal;
-      await custody.save();
-
-      await recordCustodyTransaction({
-        custodyId: custody._id,
-        type: 'spend',
-        amount: computedTotal,
-        description: `فاتورة ${invoice.referenceNumber}`,
-        descriptionEn: `Invoice ${invoice.referenceNumber}`,
-        referenceType: 'Invoice',
-        referenceId: invoice._id,
-        createdBy: req.user._id,
-      });
+      await Promise.all([
+        Custody.findByIdAndUpdate(custody._id, {
+          $push: { invoices: invoice._id },
+          $inc: { spent: computedTotal },
+        }),
+        recordCustodyTransaction({
+          custodyId: custody._id,
+          type: 'spend',
+          amount: computedTotal,
+          description: `فاتورة ${invoice.referenceNumber}`,
+          descriptionEn: `Invoice ${invoice.referenceNumber}`,
+          referenceType: 'Invoice',
+          referenceId: invoice._id,
+          createdBy: req.user._id,
+        }),
+      ]);
     }
 
-    if (!custody) {
-      await notifyInvoicePendingApproval(project, invoice);
-    }
-
-    await logActivity({
-      userId: req.user._id,
-      action: `رفع فاتورة ${invoice.referenceNumber}`,
-      actionEn: `Uploaded invoice ${invoice.referenceNumber}`,
-      entityType: 'Invoice',
-      entityId: invoice._id,
+    res.status(201).json({
+      ...invoice.toObject(),
+      project: { _id: project._id, name: project.name, nameEn: project.nameEn, manager: project.manager },
+      custody: custody
+        ? { _id: custody._id, custodyNumber: custody.custodyNumber, status: custody.status }
+        : undefined,
     });
 
-    const populated = await Invoice.findById(invoice._id)
-      .populate('project', 'name nameEn')
-      .populate('custody', 'custodyNumber');
-
-    res.status(201).json(populated);
+    void Promise.all([
+      notifyInvoicePendingApproval(project, invoice),
+      logActivity({
+        userId: req.user._id,
+        action: `رفع فاتورة ${invoice.referenceNumber}`,
+        actionEn: `Uploaded invoice ${invoice.referenceNumber}`,
+        entityType: 'Invoice',
+        entityId: invoice._id,
+      }),
+    ]).catch(() => {});
   } catch (err) {
     next(err);
   }
@@ -392,6 +387,57 @@ export async function batchReviewInvoices(req, res, next) {
 
     if (!results.length) {
       return res.status(400).json({ message: errors[0]?.message || 'No invoices reviewed' });
+    }
+
+    res.json({ count: results.length, invoices: results, errors });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function pmApproveInvoice(req, res, next) {
+  try {
+    const { approved, reason } = req.body;
+    const invoice = await custodyWorkflow.pmApproveInvoice(
+      req.params.id,
+      req.user._id,
+      approved !== false,
+      reason
+    );
+    res.json(invoice);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message });
+  }
+}
+
+export async function batchPmApproveInvoices(req, res, next) {
+  try {
+    const { invoiceIds, approved, reason } = req.body;
+    if (!Array.isArray(invoiceIds) || !invoiceIds.length) {
+      return res.status(400).json({ message: 'invoiceIds is required' });
+    }
+    if (approved === false && !reason?.trim()) {
+      return res.status(400).json({ message: 'Rejection reason is required' });
+    }
+
+    const results = [];
+    const errors = [];
+    for (const id of invoiceIds) {
+      try {
+        const invoice = await custodyWorkflow.pmApproveInvoice(
+          id,
+          req.user._id,
+          approved !== false,
+          reason
+        );
+        results.push(invoice);
+      } catch (err) {
+        errors.push({ id, message: err.message });
+      }
+    }
+
+    if (!results.length) {
+      return res.status(400).json({ message: errors[0]?.message || 'No invoices approved' });
     }
 
     res.json({ count: results.length, invoices: results, errors });

@@ -40,10 +40,10 @@ export async function resolvePaProjectIds(userId, userProjects = []) {
   return assigned;
 }
 
-/** Custodies with pending_pm invoices stuck in rejected/open — move back to PA queue (closed) */
+/** Custodies with accumulated invoices stuck in rejected/open — move back to PA queue (closed) */
 export async function repairCustodiesWithPendingInvoices() {
   const pendingCustodyIds = await Invoice.distinct('custody', {
-    status: INVOICE_STATUS.PENDING_PM,
+    status: INVOICE_STATUS.ACCUMULATED,
     custody: { $exists: true, $ne: null },
   });
   if (!pendingCustodyIds.length) return;
@@ -186,12 +186,8 @@ export async function repairSettledCustodyStatus() {
   await Custody.updateMany(filter, { $set: { status: CUSTODY_STATUS.SETTLED } });
 }
 
-/** Custody IDs chief accountant must see (new resubmit batch ready for settlement) */
+/** Custody IDs chief accountant must see (pending finance invoices) */
 export async function resolveFinanceQueueCustodyIds() {
-  await repairCustodiesWithPendingInvoices();
-  await repairCustodiesAwaitingFinance();
-  await repairCustodiesAwaitingDisbursement();
-
   return Invoice.distinct('custody', {
     status: INVOICE_STATUS.PENDING_FINANCE,
     custody: { $exists: true, $ne: null },
@@ -203,38 +199,46 @@ export async function resolvePaQueueCustodyIds(projectIds) {
   const normalized = normalizeProjectIds(projectIds);
   if (!normalized.length) return [];
 
-  await repairCustodiesWithPendingInvoices();
-  await repairCustodiesAwaitingFinance();
-
-  const pendingPmCustodyIds = await Invoice.distinct('custody', {
-    status: INVOICE_STATUS.PENDING_PM,
+  const pendingPaCustodyIds = await Invoice.distinct('custody', {
+    status: INVOICE_STATUS.ACCUMULATED,
+    project: { $in: normalized },
     custody: { $exists: true, $ne: null },
   });
-  if (!pendingPmCustodyIds.length) return [];
 
-  const ids = await Custody.distinct('_id', {
-    _id: { $in: pendingPmCustodyIds },
-    project: { $in: normalized },
-  });
-
-  return ids.map(String);
+  return pendingPaCustodyIds.map(String);
 }
 
 export async function countPaQueueCustodies(projectIds) {
   const normalized = normalizeProjectIds(projectIds);
   if (!normalized.length) return 0;
 
-  const pendingPmCustodyIds = await Invoice.distinct('custody', {
-    status: INVOICE_STATUS.PENDING_PM,
+  const pendingPaCustodyIds = await Invoice.distinct('custody', {
+    status: INVOICE_STATUS.ACCUMULATED,
     project: { $in: normalized },
     custody: { $exists: true, $ne: null },
   });
-  if (!pendingPmCustodyIds.length) return 0;
+  if (!pendingPaCustodyIds.length) return 0;
 
   const ids = await Custody.distinct('_id', {
-    _id: { $in: pendingPmCustodyIds },
+    _id: { $in: pendingPaCustodyIds },
     project: { $in: normalized },
   });
 
   return ids.length;
+}
+
+/** Invoice count awaiting PM review on a holder's custodies */
+export async function countPmQueueInvoices(holderId) {
+  if (!holderId) {
+    return Invoice.countDocuments({
+      status: INVOICE_STATUS.PENDING_PM,
+      custody: { $exists: true, $ne: null },
+    });
+  }
+  const custodyIds = await Custody.distinct('_id', { holder: holderId });
+  if (!custodyIds.length) return 0;
+  return Invoice.countDocuments({
+    status: INVOICE_STATUS.PENDING_PM,
+    custody: { $in: custodyIds },
+  });
 }
